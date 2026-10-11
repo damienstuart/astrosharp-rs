@@ -4,12 +4,19 @@ A Rust port of [AstroSharp](https://github.com/deepskydetail/AstroSharp)'s image
 The original is an R/Shiny app packaged with Electron. This port covers the **PSF**
 (sharpen), **AstroClean** (denoise) and **Hybrid** (PSF then AstroClean) models.
 The legacy "First Beta" and "Second Beta" models are not ported.
+It reads TIFF and FITS (Siril) images and saves TIFF, FITS, PNG or JPEG.
 
 The trained `neuralnet` weights are exported from the original `.RDS` files and embedded
 in the binaries, so nothing else is needed at runtime: no R, no Electron.
 
 > The upstream repository has no license covering its code or model weights. This port
 > is for personal use; get the author's permission before redistributing it.
+
+## Recommended workflow
+
+AstroSharp is meant as a **final touch-up on a stretched (non-linear) image**. The models were trained on stretched data, so stretch first (in Siril, for example) and run AstroSharp last.
+
+Images that look linear trigger a note in the GUI and on the CLI's stderr: the warning fires when 99% of pixels are darker than 0.15. Linear stacks typically sit at or below 0.04, and stretched images at 0.5 or above. Processing still runs, and linear images also look nearly black in the GUI.
 
 ## Layout
 
@@ -39,15 +46,20 @@ make icon                    # re-render assets/icon.svg into AppIcon.icns + ico
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
 ```
 
-CLI example: `astrosharp in.tif out.tif --model hybrid --psf 3 --aggressiveness 0.66`.
+CLI example: `astrosharp in.fit out.fit --model hybrid --psf 3 --aggressiveness 0.66`.
+The input can be TIFF or FITS (`.fit`/`.fits`/`.fts`).
 Options:
 - `--model hybrid|psf|astroclean` (default `hybrid`)
 - `--psf <1..8 step 0.25>`
 - `--aggressiveness <0..1>`
 - `--mode seamless|parity`
 - `--chunk-size <n>` (Hybrid in parity mode only)
-- Output format follows the file extension: `.tif`/`.tiff`, `.png` or `.jpg`/`.jpeg`
-- `--depth <8|16|32>`: TIFF 8, 16 (default) or 32 (float); PNG 8 or 16 (default); JPEG 8 only
+- Output format follows the file extension: `.tif`/`.tiff`, `.fit`/`.fits`/`.fts`, `.png` or `.jpg`/`.jpeg`
+- `--depth <8|16|32>`:
+  - TIFF: 8, 16 (default) or 32 (float).
+  - FITS: 16 or 32. The default is the input FITS's depth, otherwise 32.
+  - PNG: 8 or 16 (default).
+  - JPEG: 8 only.
 - `--quality <1..100>` (JPEG only, default 90)
 
 GUI (Hybrid is the default model):
@@ -56,13 +68,30 @@ GUI (Hybrid is the default model):
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
+- **Open image…** (or drop a file on the window) accepts TIFF and FITS.
 - **Save as** picks the output format:
   - TIFF (default): 16-bit, or 32-bit float for further processing.
+  - FITS: 32-bit float or 16-bit. This is selected automatically, at the source's depth, when you open a FITS file.
   - PNG: lossless, 16-bit (default) or 8-bit.
   - JPEG: quality 50–100 (default 90), written without chroma subsampling to keep small coloured stars crisp.
 
   Saving runs in the background.
 - **Quit** closes the app.
+
+## FITS (Siril)
+
+- **Supported files:** uncompressed FITS with the image in the primary HDU, grey or RGB (three planes). Samples can be 8/16/32/64-bit integer or 32/64-bit float, which covers what Siril writes.
+- **Not supported:** compressed FITS (`.fz`) and images stored only in extensions.
+- **Values:** integer data is scaled by its type's range (after `BZERO`/`BSCALE`). Float data is used as stored, since Siril keeps it in 0–1; float data clearly outside that range is scaled down and restored on save. Blank (NaN) pixels become 0.
+- **Row order:** follows `ROWORDER`, defaulting to FITS's bottom-up. Images are processed top row first, like TIFFs, and written back in the source's row order.
+- **Header:** saving as FITS from a FITS source keeps every header card verbatim and in order, except for the following:
+  - Structural keywords (`SIMPLE`, `BITPIX`, `NAXISn`, `EXTEND`, `BZERO`, `BSCALE`) are regenerated.
+  - Values made stale by processing (`CHECKSUM`, `DATASUM`, `DATAMIN`, `DATAMAX`, `BLANK`) are dropped.
+  - `DATE` is refreshed.
+  - A `HISTORY AstroSharp <version>: <settings>` line is appended.
+
+  Plate solutions (WCS/SIP), observation details and history are therefore kept, and any HDUs after the image are copied unchanged.
+- **Linear data:** see [Recommended workflow](#recommended-workflow).
 
 ## Fidelity to the R app
 
@@ -87,7 +116,7 @@ Behaviours deliberately reproduced:
 
 Modes:
 - **`parity`** reproduces the R app's chunked Hybrid processing, including faint seams at chunk boundaries: stage 2 sees unsharpened pixels at each chunk's rim.
-- **`seamless`** (default) processes the whole image in two passes instead. For PSF and AstroClean, both modes give identical output.
+- **`seamless`** (default) processes the whole image in two passes instead, and keeps colour output at full precision (R rounds it to 5 decimals, which would cost precision in 32-bit linear data). For grey PSF and AstroClean, both modes give identical output.
 
 Intentional differences from the R app:
 - **Colour vs grey** is detected from the file. The R app needed the correct radio button and failed otherwise.

@@ -38,7 +38,7 @@ fn save(img: &Image, name: &str, format: FileFormat, depth: BitDepth) -> PathBuf
         depth,
         jpeg_quality: 95,
     };
-    save_image(&path, img, &opts).unwrap();
+    save_image(&path, img, &opts, None).unwrap();
     path
 }
 
@@ -66,7 +66,7 @@ fn unsupported_depths_are_rejected() {
             depth,
             ..SaveOptions::default()
         };
-        let err = save_image(temp_path("unsupported"), &img, &opts).unwrap_err();
+        let err = save_image(temp_path("unsupported"), &img, &opts, None).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)), "{format:?} {depth:?}");
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod color;
 pub mod features;
+pub mod fits;
 pub mod image;
 pub mod io;
 pub mod model;
@@ -10,8 +11,12 @@ pub mod pipeline;
 pub mod rround;
 pub mod weights;
 
+pub use fits::FitsHeader;
 pub use image::{Image, Plane};
-pub use io::{BitDepth, FileFormat, SaveOptions, read_tiff, save_image, write_tiff};
+pub use io::{BitDepth, FileFormat, SaveOptions, read_image, read_tiff, save_image, write_tiff};
+
+/// Version of AstroSharp (all crates share the workspace version).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use pipeline::{Mode, ModelKind, Params, Progress, process, process_plane};
 
 #[derive(Debug, thiserror::Error)]

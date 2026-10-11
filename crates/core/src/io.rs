@@ -1,5 +1,5 @@
 //! Image I/O. TIFF reading/writing uses the same value scaling as R's `tiff` package;
-//! processed images can also be saved as PNG or JPEG.
+//! FITS is handled by [`crate::fits`]; processed images can also be saved as PNG or JPEG.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
@@ -10,6 +10,7 @@ use tiff::decoder::{Decoder, DecodingResult, Limits};
 use tiff::encoder::{TiffEncoder, colortype};
 use tiff::tags::Tag;
 
+use crate::fits::{self, FitsHeader};
 use crate::{Error, Image};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,16 +39,23 @@ impl BitDepth {
 pub enum FileFormat {
     #[default]
     Tiff,
+    Fits,
     Png,
     Jpeg,
 }
 
 impl FileFormat {
-    pub const ALL: [FileFormat; 3] = [FileFormat::Tiff, FileFormat::Png, FileFormat::Jpeg];
+    pub const ALL: [FileFormat; 4] = [
+        FileFormat::Tiff,
+        FileFormat::Fits,
+        FileFormat::Png,
+        FileFormat::Jpeg,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             FileFormat::Tiff => "TIFF",
+            FileFormat::Fits => "FITS",
             FileFormat::Png => "PNG",
             FileFormat::Jpeg => "JPEG",
         }
@@ -57,6 +65,7 @@ impl FileFormat {
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
             FileFormat::Tiff => &["tif", "tiff"],
+            FileFormat::Fits => &["fit", "fits", "fts"],
             FileFormat::Png => &["png"],
             FileFormat::Jpeg => &["jpg", "jpeg"],
         }
@@ -74,15 +83,19 @@ impl FileFormat {
     pub fn depths(self) -> &'static [BitDepth] {
         match self {
             FileFormat::Tiff => &[BitDepth::U8, BitDepth::U16, BitDepth::F32],
+            FileFormat::Fits => &[BitDepth::U16, BitDepth::F32],
             FileFormat::Png => &[BitDepth::U8, BitDepth::U16],
             FileFormat::Jpeg => &[BitDepth::U8],
         }
     }
 
-    /// 16 bits where the format allows it (as the R app wrote); JPEG is always 8-bit.
+    /// 16 bits where the format allows it (as the R app wrote), 32-bit float for FITS
+    /// (Siril's working format); JPEG is always 8-bit. A FITS source's own depth takes
+    /// precedence when saving FITS (see [`FitsHeader::source_depth`]).
     pub fn default_depth(self) -> BitDepth {
         match self {
             FileFormat::Tiff | FileFormat::Png => BitDepth::U16,
+            FileFormat::Fits => BitDepth::F32,
             FileFormat::Jpeg => BitDepth::U8,
         }
     }
@@ -146,8 +159,25 @@ pub fn read_tiff(path: impl AsRef<Path>) -> Result<Image, Error> {
     Ok(Image::new(w, h, channels, data))
 }
 
+/// Reads a TIFF or FITS image (chosen by extension). FITS files also return their
+/// header, so it can be preserved when saving.
+pub fn read_image(path: impl AsRef<Path>) -> Result<(Image, Option<FitsHeader>), Error> {
+    if FileFormat::from_path(&path) == Some(FileFormat::Fits) {
+        let (img, header) = fits::read_fits(path)?;
+        Ok((img, Some(header)))
+    } else {
+        Ok((read_tiff(path)?, None))
+    }
+}
+
 /// Saves `img` (values clipped to [0, 1]) in the format and depth given by `opts`.
-pub fn save_image(path: impl AsRef<Path>, img: &Image, opts: &SaveOptions) -> Result<(), Error> {
+/// `fits` supplies the header (and extensions) to preserve when writing FITS.
+pub fn save_image(
+    path: impl AsRef<Path>,
+    img: &Image,
+    opts: &SaveOptions,
+    fits: Option<&FitsHeader>,
+) -> Result<(), Error> {
     if !opts.format.depths().contains(&opts.depth) {
         return Err(Error::Unsupported(format!(
             "{} files cannot store {} samples",
@@ -157,6 +187,7 @@ pub fn save_image(path: impl AsRef<Path>, img: &Image, opts: &SaveOptions) -> Re
     }
     match opts.format {
         FileFormat::Tiff => write_tiff(path, img, opts.depth),
+        FileFormat::Fits => fits::write_fits(path, img, opts.depth, fits),
         FileFormat::Png => write_png(path, img, opts.depth),
         FileFormat::Jpeg => write_jpeg(path, img, opts.jpeg_quality),
     }

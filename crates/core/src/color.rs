@@ -97,6 +97,20 @@ pub fn srgb_to_luv(rgb: [f64; 3]) -> [f64; 3] {
 /// `convertColor(luv, from = "Luv", to = "sRGB")` for one pixel, including R's
 /// output trimming (round to 5 decimals, clip to [0, 1]).
 pub fn luv_to_srgb(luv: [f64; 3]) -> [f64; 3] {
+    luv_to_linear_rgb(luv).map(|c| clip(round_digits(linear_to_srgb(c), 5)))
+}
+
+/// Like [`luv_to_srgb`] but without R's rounding to 5 decimals, which would discard
+/// precision in 32-bit (especially linear) data.
+pub fn luv_to_srgb_unrounded(luv: [f64; 3]) -> [f64; 3] {
+    luv_to_linear_rgb(luv).map(|c| clip(linear_to_srgb(c)))
+}
+
+fn clip(c: f64) -> f64 {
+    if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) }
+}
+
+fn luv_to_linear_rgb(luv: [f64; 3]) -> [f64; 3] {
     let [l, u, v] = luv;
     let xyz = if l == 0.0 {
         [0.0; 3]
@@ -118,8 +132,5 @@ pub fn luv_to_srgb(luv: [f64; 3]) -> [f64; 3] {
         let z = x * a + b;
         [x, y, z]
     };
-    mul(xyz, &M_INV).map(|c| {
-        let c = round_digits(linear_to_srgb(c), 5);
-        if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) }
-    })
+    mul(xyz, &M_INV)
 }

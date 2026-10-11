@@ -214,6 +214,37 @@ fn seamless_matches_parity_for_single_models() {
 }
 
 #[test]
+fn seamless_colour_keeps_full_precision() {
+    let img = read_tiff(testdata().join("samples/CT1.tif")).unwrap();
+    // Aggressiveness 0 leaves lightness unchanged, so only the colour round trip remains.
+    let p = Params {
+        model: ModelKind::Psf,
+        aggressiveness: 0.0,
+        ..Params::default()
+    };
+    let run = |mode| process(&img, &Params { mode, ..p.clone() }, &Progress::new()).unwrap();
+    let seamless = max_abs_diff(&run(Mode::Seamless).data, &img.data);
+    assert!(
+        seamless < 1e-9,
+        "seamless colour round trip changed values by {seamless}"
+    );
+    // Parity mode rounds to 5 decimals like R's convertColor.
+    let parity = max_abs_diff(&run(Mode::Parity).data, &img.data);
+    assert!(
+        parity > 1e-7 && parity <= 5e-6 + 1e-12,
+        "parity diff {parity}"
+    );
+}
+
+#[test]
+fn sample_images_are_not_flagged_as_linear() {
+    for name in ["T1.tif", "CT1.tif", "R1.tif", "CR1.tif"] {
+        let img = read_tiff(testdata().join("samples").join(name)).unwrap();
+        assert!(!img.looks_linear(), "{name}");
+    }
+}
+
+#[test]
 fn hybrid_seams_are_confined_to_chunk_boundaries() {
     let img = read_tiff(testdata().join("samples/T1.tif")).unwrap();
     let p = Params {

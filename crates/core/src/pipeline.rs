@@ -22,11 +22,12 @@ pub enum ModelKind {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
-    /// Whole-image passes. Identical to `Parity` for PSF and AstroClean; for Hybrid it
-    /// avoids the faint seams the R app's chunked processing leaves.
+    /// Whole-image passes at full precision: Hybrid avoids the faint seams the R app's
+    /// chunked processing leaves, and colour output is not rounded to 5 decimals. Grey
+    /// PSF and AstroClean output is identical to `Parity`.
     #[default]
     Seamless,
-    /// Reproduces the R app's chunked Hybrid processing exactly.
+    /// Reproduces the R app's output exactly (chunked Hybrid, colour rounded to 5 decimals).
     Parity,
 }
 
@@ -52,6 +53,29 @@ impl Default for Params {
             mode: Mode::Seamless,
             chunk_size: 325,
         }
+    }
+}
+
+impl Params {
+    /// Short description, e.g. `Hybrid (PSF 3, aggressiveness 0.66, seamless)`.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.model != ModelKind::AstroClean {
+            parts.push(format!("PSF {}", self.psf_fwhm));
+        }
+        parts.push(format!("aggressiveness {:.2}", self.aggressiveness));
+        if self.model == ModelKind::Hybrid {
+            parts.push(match self.mode {
+                Mode::Seamless => "seamless".to_string(),
+                Mode::Parity => format!("R parity, chunk size {}", self.chunk_size),
+            });
+        }
+        let name = match self.model {
+            ModelKind::Psf => "PSF",
+            ModelKind::AstroClean => "AstroClean",
+            ModelKind::Hybrid => "Hybrid",
+        };
+        format!("{name} ({})", parts.join(", "))
     }
 }
 
@@ -123,7 +147,14 @@ pub fn process(img: &Image, params: &Params, progress: &Progress) -> Result<Imag
     let data = luv
         .par_iter()
         .zip(&out.data)
-        .flat_map_iter(|(p, &l)| color::luv_to_srgb([l * 100.0, p[1], p[2]]))
+        .flat_map_iter(|(p, &l)| {
+            let luv = [l * 100.0, p[1], p[2]];
+            // R rounds to 5 decimals; only parity mode reproduces that.
+            match params.mode {
+                Mode::Parity => color::luv_to_srgb(luv),
+                Mode::Seamless => color::luv_to_srgb_unrounded(luv),
+            }
+        })
         .collect();
     Ok(Image::new(w, h, 3, data))
 }

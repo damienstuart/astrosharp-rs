@@ -1,5 +1,9 @@
 use std::ops::Range;
 
+/// 99th-percentile brightness below which an image is treated as linear (unstretched).
+/// Linear stacks tested sit at or below 0.04, stretched images at 0.58 or above.
+const LINEAR_P99: f64 = 0.15;
+
 /// A grey (1 channel) or RGB (3 channel) image with values nominally in [0, 1],
 /// stored row-major with interleaved channels.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +31,25 @@ impl Image {
 
     pub fn is_color(&self) -> bool {
         self.channels == 3
+    }
+
+    /// Whether the image looks linear (unstretched): 99% of pixels darker than 0.15.
+    /// AstroSharp's models were trained on stretched images, so it is meant for those.
+    pub fn looks_linear(&self) -> bool {
+        let pixels = self.width * self.height;
+        let step = (pixels / 1_000_000).max(1);
+        let mut lum: Vec<f64> = self
+            .data
+            .chunks_exact(self.channels)
+            .step_by(step)
+            .map(|p| p.iter().sum::<f64>() / p.len() as f64)
+            .collect();
+        if lum.is_empty() {
+            return false;
+        }
+        let k = (lum.len() - 1) * 99 / 100;
+        let (_, p99, _) = lum.select_nth_unstable_by(k, f64::total_cmp);
+        *p99 < LINEAR_P99
     }
 
     pub fn crop(&self, rows: Range<usize>, cols: Range<usize>) -> Image {
@@ -101,5 +124,39 @@ impl Plane {
 
     pub fn row(&self, r: usize) -> &[f64] {
         &self.data[r * self.width..(r + 1) * self.width]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dark background with 0.5% bright "stars", like a linear stack.
+    fn linear_like(w: usize, h: usize) -> Image {
+        let data = (0..w * h)
+            .map(|i| {
+                if i % 200 == 0 {
+                    0.9
+                } else {
+                    0.01 + (i % 7) as f64 * 0.001
+                }
+            })
+            .collect();
+        Image::new(w, h, 1, data)
+    }
+
+    #[test]
+    fn linear_detection() {
+        assert!(linear_like(100, 80).looks_linear());
+        let stretched = Image::new(10, 10, 1, (0..100).map(|i| i as f64 / 99.0).collect());
+        assert!(!stretched.looks_linear());
+        // Dark background but a stretched top end (like a final image of a dark field).
+        let dark_field = Image::new(
+            10,
+            10,
+            1,
+            (0..100).map(|i| if i < 90 { 0.05 } else { 0.6 }).collect(),
+        );
+        assert!(!dark_field.looks_linear());
     }
 }

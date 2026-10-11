@@ -8,8 +8,8 @@ use eframe::egui::{self, ColorImage, Pos2, pos2};
 use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
-    BitDepth, FileFormat, Image, Mode, ModelKind, Params, Progress, SaveOptions, process,
-    read_tiff, save_image,
+    BitDepth, FileFormat, FitsHeader, Image, Mode, ModelKind, Params, Progress, SaveOptions,
+    VERSION, process, read_image, save_image,
 };
 
 use crate::viewer::{self, Layers, Picture, Roi, View};
@@ -23,6 +23,10 @@ const UPDATE_DEBOUNCE: Duration = Duration::from_millis(250);
 struct Loaded {
     path: PathBuf,
     image: Arc<Image>,
+    /// Header of a FITS source, preserved when saving as FITS.
+    fits: Option<FitsHeader>,
+    /// The image looks unstretched (see [`Image::looks_linear`]).
+    linear: bool,
     picture: Picture,
 }
 
@@ -124,6 +128,7 @@ pub struct AstroSharpApp {
     tiff_depth: BitDepth,
     png_depth: BitDepth,
     jpeg_quality: u8,
+    fits_depth: BitDepth,
     save_job: Option<SaveJob>,
     preview: Option<PreviewResult>,
     preview_job: Option<Job>,
@@ -154,6 +159,7 @@ impl AstroSharpApp {
             save_format: FileFormat::Tiff,
             tiff_depth: FileFormat::Tiff.default_depth(),
             png_depth: FileFormat::Png.default_depth(),
+            fits_depth: FileFormat::Fits.default_depth(),
             jpeg_quality: SaveOptions::default().jpeg_quality,
             save_job: None,
             preview: None,
@@ -161,7 +167,7 @@ impl AstroSharpApp {
             update_requested: None,
             full: None,
             full_job: None,
-            status: "Open a TIFF (or drop one on the window) to begin.".into(),
+            status: "Open a TIFF or FITS file (or drop one on the window) to begin.".into(),
         };
         if let Some(path) = initial {
             app.open(&cc.egui_ctx, &path);
@@ -170,11 +176,11 @@ impl AstroSharpApp {
     }
 
     fn open(&mut self, ctx: &egui::Context, path: &Path) {
-        match read_tiff(path) {
-            Ok(img) if img.width < MIN_SIZE || img.height < MIN_SIZE => {
+        match read_image(path) {
+            Ok((img, _)) if img.width < MIN_SIZE || img.height < MIN_SIZE => {
                 self.status = format!("Image too small (minimum {MIN_SIZE}x{MIN_SIZE}).");
             }
-            Ok(img) => {
+            Ok((img, fits)) => {
                 let max_side = ctx.input(|i| i.max_texture_side);
                 let (ci, step) = Picture::color_image(&img, max_side);
                 let picture = Picture::new(ctx, "original", ci, step, img.width, img.height);
@@ -186,9 +192,17 @@ impl AstroSharpApp {
                     img.height,
                     if img.is_color() { "RGB" } else { "grey" }
                 );
+                // Default to saving FITS like the source, so its header is kept.
+                if let Some(depth) = fits.as_ref().and_then(FitsHeader::source_depth) {
+                    self.save_format = FileFormat::Fits;
+                    self.fits_depth = depth;
+                    self.status += &format!(" (FITS, {})", depth.name());
+                }
                 self.loaded = Some(Loaded {
                     path: path.to_path_buf(),
+                    linear: img.looks_linear(),
                     image: Arc::new(img),
+                    fits,
                     picture,
                 });
                 self.preview = None;
@@ -250,15 +264,27 @@ impl AstroSharpApp {
             format,
             depth: match format {
                 FileFormat::Tiff => self.tiff_depth,
+                FileFormat::Fits => self.fits_depth,
                 FileFormat::Png => self.png_depth,
                 FileFormat::Jpeg => BitDepth::U8,
             },
             jpeg_quality: self.jpeg_quality,
         };
+        // FITS output keeps the source header (if any) and records the processing.
+        let header = (format == FileFormat::Fits).then(|| {
+            let mut h = self
+                .loaded
+                .as_ref()
+                .and_then(|l| l.fits.clone())
+                .unwrap_or_default();
+            h.add_history(&format!("AstroSharp {VERSION}: {}", full.params.describe()));
+            h
+        });
         let (tx, rx) = mpsc::channel();
         let (image, target, ctx) = (full.image.clone(), path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(save_image(&target, &image, &opts).map_err(|e| e.to_string()));
+            let result = save_image(&target, &image, &opts, header.as_ref());
+            let _ = tx.send(result.map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
         self.save_job = Some(SaveJob { path, rx });
@@ -348,9 +374,9 @@ impl AstroSharpApp {
         ui.heading("AstroSharp");
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Open TIFF…").clicked()
+            if ui.button("Open image…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("TIFF", &["tif", "tiff"])
+                    .add_filter("TIFF or FITS", &["tif", "tiff", "fit", "fits", "fts"])
                     .pick_file()
             {
                 self.open(ui.ctx(), &path);
@@ -498,6 +524,14 @@ impl AstroSharpApp {
                         .on_hover_text("Full precision, for further processing.");
                 });
             }
+            FileFormat::Fits => {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.fits_depth, BitDepth::F32, "32-bit float")
+                        .on_hover_text("Siril's working format.");
+                    ui.selectable_value(&mut self.fits_depth, BitDepth::U16, "16-bit")
+                        .on_hover_text("Unsigned 16-bit integers.");
+                });
+            }
             FileFormat::Png => {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.png_depth, BitDepth::U16, "16-bit")
@@ -545,6 +579,15 @@ impl AstroSharpApp {
         if self.save_job.is_some() {
             ui.spinner();
         }
+        if self.loaded.as_ref().is_some_and(|l| l.linear) {
+            ui.label(
+                egui::RichText::new(
+                    "This image looks linear (unstretched). AstroSharp is meant as a final \
+                     touch-up on a stretched image; stretch it first for best results.",
+                )
+                .color(egui::Color32::from_rgb(255, 200, 40)),
+            );
+        }
         ui.label(&self.status);
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -588,7 +631,7 @@ impl eframe::App for AstroSharpApp {
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let Some(loaded) = &self.loaded else {
-                ui.centered_and_justified(|ui| ui.label("Drop a TIFF here"));
+                ui.centered_and_justified(|ui| ui.label("Drop a TIFF or FITS file here"));
                 return;
             };
             // Without the preview region, keep showing the last full result while a new

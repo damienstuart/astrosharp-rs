@@ -1,3 +1,4 @@
 /target
 /testdata/golden
 .DS_Store
+/tmp-fit-samples
