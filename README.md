@@ -25,20 +25,33 @@ in the binaries, so nothing else is needed at runtime: no R, no Electron.
 
 ## Usage
 
+`make` lists the common tasks:
+
 ```sh
-cargo run --release -p astrosharp-gui [image.tif]     # desktop app
-cargo run --release -p astrosharp-cli -- in.tif out.tif --model hybrid --psf 3 --aggressiveness 0.66
-./tools/bundle_macos.sh                               # -> target/release/bundle/AstroSharp.app
+make run [IMAGE=image.tif]   # desktop app
+make release                 # build target/release/astrosharp and astrosharp-gui
+make app                     # target/release/bundle/AstroSharp.app (unsigned)
+make install                 # ...and copy it to /Applications (APP_DIR=... to change)
+make check                   # rustfmt check + clippy + tests
+make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
 ```
 
-CLI options: `--model psf|astroclean|hybrid`, `--psf <1..8 step 0.25>`, `--aggressiveness <0..1>`,
-`--mode seamless|parity`, `--chunk-size <n>` (Hybrid in parity mode only), `--float` (write 32-bit float TIFF).
+CLI example: `astrosharp in.tif out.tif --model hybrid --psf 3 --aggressiveness 0.66`.
+Options:
+- `--model psf|astroclean|hybrid`
+- `--psf <1..8 step 0.25>`
+- `--aggressiveness <0..1>`
+- `--mode seamless|parity`
+- `--chunk-size <n>` (Hybrid in parity mode only)
+- `--float` (write a 32-bit float TIFF)
 
-GUI controls:
-- Drag to pan, scroll or pinch to zoom, double-click to fit.
-- Shift-drag (or right-drag) to choose the preview region. The preview re-runs automatically when a setting changes.
-- Use the before/after split slider to compare, or hold Space to show the original.
-- "Process full image" runs in the background with progress and Cancel.
+GUI:
+- **Processing:** the whole image is reprocessed automatically about 0.25 s after the last settings change. A progress bar with Cancel shows while it runs.
+- **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
+- **Compare before/after** (off by default) adds an original | processed split slider.
+- **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image".
+- **Save as 32-bit float** writes float samples instead of 16-bit integers.
+- **Quit** closes the app.
 
 ## Fidelity to the R app
 

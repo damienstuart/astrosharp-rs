@@ -165,6 +165,7 @@ pub struct Layers<'a> {
     pub original: &'a Picture,
     /// Processed full image, or processed ROI with its position.
     pub processed: Option<(&'a Picture, Pos2)>,
+    /// ROI to outline. When set, shift-drag / right-drag selects a new one.
     pub roi: Option<Roi>,
     /// Fraction of the view width showing the original on the left.
     pub split: f32,
@@ -195,9 +196,9 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Ro
         view.fit();
     }
 
-    // Shift-drag or right-drag selects a region; plain drag pans.
-    let selecting =
-        ui.input(|i| i.modifiers.shift) || response.dragged_by(egui::PointerButton::Secondary);
+    // Shift-drag or right-drag selects a region (when a ROI is in use); plain drag pans.
+    let selecting = layers.roi.is_some()
+        && (ui.input(|i| i.modifiers.shift) || response.dragged_by(egui::PointerButton::Secondary));
     let mut finished = None;
     if response.drag_started() && selecting {
         view.drag_anchor = response

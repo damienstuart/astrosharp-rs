@@ -16,8 +16,8 @@ use crate::viewer::{self, Layers, Picture, Roi, View};
 /// Extra context processed around the ROI so the preview matches full-image processing
 /// (two stacked 9x9 windows for Hybrid).
 const PREVIEW_MARGIN: usize = 8;
-/// Delay after the last parameter change before the preview is recomputed.
-const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(250);
+/// Delay after the last change before the image (or preview region) is reprocessed.
+const UPDATE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 struct Loaded {
     path: PathBuf,
@@ -104,11 +104,15 @@ pub struct AstroSharpApp {
     loaded: Option<Loaded>,
     roi: Option<Roi>,
     view: View,
+    /// Show a before/after split.
+    compare: bool,
     split: f32,
+    /// Process only the preview region automatically; the full image on request.
+    preview_only: bool,
     float_output: bool,
     preview: Option<PreviewResult>,
     preview_job: Option<Job>,
-    preview_requested: Option<Instant>,
+    update_requested: Option<Instant>,
     full: Option<Processed>,
     full_job: Option<Job>,
     last_params: Params,
@@ -125,11 +129,13 @@ impl AstroSharpApp {
             loaded: None,
             roi: None,
             view: View::default(),
+            compare: false,
             split: 0.5,
+            preview_only: false,
             float_output: false,
             preview: None,
             preview_job: None,
-            preview_requested: None,
+            update_requested: None,
             full: None,
             full_job: None,
             status: "Open a TIFF (or drop one on the window) to begin.".into(),
@@ -167,14 +173,31 @@ impl AstroSharpApp {
                 self.full = None;
                 self.full_job = None;
                 self.view.fit();
-                self.request_preview();
+                self.request_update();
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
         }
     }
 
-    fn request_preview(&mut self) {
-        self.preview_requested = Some(Instant::now());
+    /// Reprocesses the image (or the preview region) once changes settle.
+    fn request_update(&mut self) {
+        self.update_requested = Some(Instant::now());
+    }
+
+    fn full_is_current(&self) -> bool {
+        self.full.as_ref().is_some_and(|f| f.params == self.params)
+            || self
+                .full_job
+                .as_ref()
+                .is_some_and(|j| j.params == self.params)
+    }
+
+    fn start_full(&mut self, ctx: &egui::Context) {
+        if let Some(l) = &self.loaded {
+            // Replacing a running job cancels it (see `Drop for Job`).
+            self.full_job = Some(Job::spawn(ctx, l.image.clone(), self.params.clone(), None));
+            self.status = "Processing…".into();
+        }
     }
 
     fn poll_jobs(&mut self, ctx: &egui::Context) {
@@ -196,7 +219,7 @@ impl AstroSharpApp {
                 Ok((img, ci, step)) => {
                     let picture = Picture::new(ctx, "processed", ci, step, img.width, img.height);
                     self.status =
-                        format!("Processed in {:.1}s.", job.started.elapsed().as_secs_f32());
+                        format!("Processed in {:.2}s.", job.started.elapsed().as_secs_f32());
                     self.full = Some(Processed {
                         params: job.params.clone(),
                         image: Arc::new(img),
@@ -208,20 +231,25 @@ impl AstroSharpApp {
             }
         }
 
-        if let (Some(t), Some(loaded), Some(roi)) = (self.preview_requested, &self.loaded, self.roi)
+        if let Some(t) = self.update_requested
+            && self.loaded.is_some()
         {
-            let wait = PREVIEW_DEBOUNCE.saturating_sub(t.elapsed());
-            if wait.is_zero() {
-                self.preview_requested = None;
-                // Replacing a running job cancels it (see `Drop for Job`).
-                self.preview_job = Some(Job::spawn(
-                    ctx,
-                    loaded.image.clone(),
-                    self.params.clone(),
-                    Some(roi),
-                ));
-            } else {
+            let wait = UPDATE_DEBOUNCE.saturating_sub(t.elapsed());
+            if !wait.is_zero() {
                 ctx.request_repaint_after(wait);
+            } else {
+                self.update_requested = None;
+                if !self.preview_only {
+                    if !self.full_is_current() {
+                        self.start_full(ctx);
+                    }
+                } else if let (Some(l), Some(roi)) = (&self.loaded, self.roi) {
+                    if self.full_job.take_if(|j| j.params != self.params).is_some() {
+                        self.status = "Full-image processing cancelled (settings changed).".into();
+                    }
+                    let params = self.params.clone();
+                    self.preview_job = Some(Job::spawn(ctx, l.image.clone(), params, Some(roi)));
+                }
             }
         }
         if self.preview_job.is_some() || self.full_job.is_some() {
@@ -287,33 +315,49 @@ impl AstroSharpApp {
         ui.separator();
 
         ui.label("View");
-        ui.add(
-            egui::Slider::new(&mut self.split, 0.0..=1.0)
-                .show_value(false)
-                .text("Before | after"),
-        );
-        ui.small("Drag to pan, scroll to zoom, double-click to fit.\nShift-drag or right-drag to choose the preview region.\nHold Space to see the original.");
+        ui.checkbox(&mut self.compare, "Compare before/after");
+        if self.compare {
+            ui.add(
+                egui::Slider::new(&mut self.split, 0.0..=1.0)
+                    .show_value(false)
+                    .text("Before | after"),
+            );
+        }
+        if ui
+            .checkbox(&mut self.preview_only, "Preview region only")
+            .on_hover_text(
+                "Process just a region while adjusting settings; process the full image on request.",
+            )
+            .changed()
+        {
+            if !self.preview_only {
+                self.preview_job = None;
+            }
+            self.request_update();
+        }
+        let mut help = String::from("Drag to pan, scroll to zoom, double-click to fit.\n");
+        if self.preview_only {
+            help += "Shift-drag or right-drag to choose the region.\n";
+        }
+        help += "Hold Space to see the original.";
+        ui.small(help);
         ui.separator();
 
-        let loaded = self.loaded.is_some();
         if let Some(job) = &self.full_job {
             ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
             if ui.button("Cancel").clicked() {
                 self.full_job = None;
                 self.status = "Processing cancelled.".into();
             }
-        } else if ui
-            .add_enabled(loaded, egui::Button::new("Process full image"))
-            .clicked()
-            && let Some(l) = &self.loaded
+        } else if self.preview_only
+            && ui
+                .add_enabled(
+                    self.loaded.is_some(),
+                    egui::Button::new("Process full image"),
+                )
+                .clicked()
         {
-            self.full_job = Some(Job::spawn(
-                ui.ctx(),
-                l.image.clone(),
-                self.params.clone(),
-                None,
-            ));
-            self.status = "Processing…".into();
+            self.start_full(ui.ctx());
         }
 
         let current = self.full.as_ref().filter(|f| f.params == self.params);
@@ -321,7 +365,9 @@ impl AstroSharpApp {
         ui.checkbox(&mut self.float_output, "Save as 32-bit float");
         if ui
             .add_enabled(current.is_some(), egui::Button::new("Save processed TIFF…"))
-            .on_disabled_hover_text("Process the full image with the current settings first.")
+            .on_disabled_hover_text(
+                "Available once the full image has been processed with the current settings.",
+            )
             .clicked()
             && let (Some(full), Some(l)) = (current, &self.loaded)
         {
@@ -351,6 +397,13 @@ impl AstroSharpApp {
             });
         }
         ui.label(&self.status);
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(8.0);
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
     }
 }
 
@@ -379,7 +432,7 @@ impl eframe::App for AstroSharpApp {
 
         if self.params != self.last_params {
             self.last_params = self.params.clone();
-            self.request_preview();
+            self.request_update();
         }
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -387,20 +440,25 @@ impl eframe::App for AstroSharpApp {
                 ui.centered_and_justified(|ui| ui.label("Drop a TIFF here"));
                 return;
             };
-            let processed = match (&self.full, &self.preview) {
-                (Some(f), _) if f.params == self.params => Some((&f.picture, Pos2::ZERO)),
-                (_, Some(p)) => Some((&p.picture, pos2(p.roi.x as f32, p.roi.y as f32))),
+            // Without the preview region, keep showing the last full result while a new
+            // one is computed.
+            let full = |f: &&Processed| !self.preview_only || f.params == self.params;
+            let processed = match (self.full.as_ref().filter(full), &self.preview) {
+                (Some(f), _) => Some((&f.picture, Pos2::ZERO)),
+                (None, Some(p)) if self.preview_only => {
+                    Some((&p.picture, pos2(p.roi.x as f32, p.roi.y as f32)))
+                }
                 _ => None,
             };
             let layers = Layers {
                 original: &loaded.picture,
                 processed,
-                roi: self.roi,
-                split: self.split,
+                roi: self.roi.filter(|_| self.preview_only),
+                split: if self.compare { self.split } else { 0.0 },
             };
             if let Some(roi) = viewer::show(ui, &mut self.view, layers) {
                 self.roi = Some(roi);
-                self.request_preview();
+                self.request_update();
             }
         });
     }
