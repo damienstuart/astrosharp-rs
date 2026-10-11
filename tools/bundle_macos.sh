@@ -9,8 +9,9 @@ version=$(cargo metadata --no-deps --format-version 1 |
     python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "astrosharp-gui"))')
 app=target/release/bundle/AstroSharp.app
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/astrosharp-gui "$app/Contents/MacOS/AstroSharp"
+cp assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,6 +23,7 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleIdentifier</key><string>local.astrosharp</string>
     <key>CFBundleExecutable</key><string>AstroSharp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleShortVersionString</key><string>${version}</string>
     <key>CFBundleVersion</key><string>${version}</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -30,4 +32,6 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# Nudge Finder/Dock to pick up a changed icon.
+touch "$app"
 echo "Built $app"

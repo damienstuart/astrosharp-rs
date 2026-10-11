@@ -1,4 +1,4 @@
-//! Zoomable/pannable image view with a before/after split and ROI selection.
+//! Zoomable/pannable image view with a draggable before/after divider and ROI selection.
 
 use eframe::egui::{
     self, Color32, ColorImage, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2, pos2,
@@ -167,9 +167,14 @@ pub struct Layers<'a> {
     pub processed: Option<(&'a Picture, Pos2)>,
     /// ROI to outline. When set, shift-drag / right-drag selects a new one.
     pub roi: Option<Roi>,
-    /// Fraction of the view width showing the original on the left.
-    pub split: f32,
+    /// Before/after divider position as a fraction of the view width (original on the
+    /// left), or `None` to show only the processed image. Dragging the divider updates it.
+    pub split: Option<&'a mut f32>,
 }
+
+/// Half-width of the divider's grab area, and the radius of its handle.
+const HANDLE_RADIUS: f32 = 14.0;
+const ACCENT: Color32 = Color32::from_rgb(255, 200, 40);
 
 /// Shows the image view; returns a new ROI if the user finished selecting one.
 pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Roi> {
@@ -215,12 +220,27 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Ro
         finished = view.selecting.take();
     }
 
+    // The divider sits on top of the image, so it takes drags before the pan/select above.
+    let divider_x = layers.split.map(|split| {
+        let x = screen.left() + *split * screen.width();
+        let grab = Rect::from_x_y_ranges(x - HANDLE_RADIUS..=x + HANDLE_RADIUS, screen.y_range());
+        let handle = ui
+            .interact(grab, response.id.with("divider"), Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if handle.dragged()
+            && let Some(p) = handle.interact_pointer_pos()
+        {
+            *split = ((p.x - screen.left()) / screen.width()).clamp(0.0, 1.0);
+        }
+        screen.left() + *split * screen.width()
+    });
+
     painter.rect_filled(screen, 0.0, Color32::from_gray(24));
     layers.original.paint(&painter, view, screen, Pos2::ZERO);
 
     let show_processed = !ui.input(|i| i.key_down(egui::Key::Space));
-    let split_x = screen.left() + layers.split * screen.width();
     if let (Some((picture, origin)), true) = (layers.processed, show_processed) {
+        let split_x = divider_x.unwrap_or(screen.left());
         let clip = Rect::from_min_max(pos2(split_x, screen.top()), screen.max);
         picture.paint(
             &painter.with_clip_rect(clip.intersect(screen)),
@@ -228,43 +248,15 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Ro
             screen,
             origin,
         );
-        if layers.split > 0.0 {
-            painter.vline(
-                split_x,
-                screen.y_range(),
-                Stroke::new(1.5, Color32::from_white_alpha(180)),
-            );
-            let label = |pos: Pos2, align, text: &str| {
-                painter.text(
-                    pos,
-                    align,
-                    text,
-                    egui::FontId::proportional(13.0),
-                    Color32::from_white_alpha(200),
-                );
-            };
-            label(
-                pos2(split_x - 8.0, screen.top() + 8.0),
-                egui::Align2::RIGHT_TOP,
-                "original",
-            );
-            label(
-                pos2(split_x + 8.0, screen.top() + 8.0),
-                egui::Align2::LEFT_TOP,
-                "processed",
-            );
+        if let Some(x) = divider_x {
+            paint_divider(&painter, screen, x);
         }
     }
 
     if let Some(roi) = view.selecting.or(layers.roi) {
         let r = roi.rect();
         let rect = Rect::from_min_max(view.to_screen(screen, r.min), view.to_screen(screen, r.max));
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.5, Color32::from_rgb(255, 200, 40)),
-            StrokeKind::Outside,
-        );
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
     }
 
     if let Some(p) = response.hover_pos() {
@@ -285,4 +277,55 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Ro
         }
     }
     finished
+}
+
+/// The before/after line with "original" / "processed" labels and a drag handle.
+fn paint_divider(painter: &egui::Painter, screen: Rect, x: f32) {
+    painter.vline(
+        x,
+        screen.y_range(),
+        Stroke::new(1.5, Color32::from_white_alpha(180)),
+    );
+    let label = |pos: Pos2, align, text: &str| {
+        painter.text(
+            pos,
+            align,
+            text,
+            egui::FontId::proportional(13.0),
+            Color32::from_white_alpha(200),
+        );
+    };
+    label(
+        pos2(x - 8.0, screen.top() + 8.0),
+        egui::Align2::RIGHT_TOP,
+        "original",
+    );
+    label(
+        pos2(x + 8.0, screen.top() + 8.0),
+        egui::Align2::LEFT_TOP,
+        "processed",
+    );
+
+    let c = pos2(x, screen.center().y);
+    painter.circle(
+        c,
+        HANDLE_RADIUS,
+        ACCENT,
+        Stroke::new(1.5, Color32::from_black_alpha(140)),
+    );
+    let dark = Color32::from_rgb(43, 34, 0);
+    for dir in [-1.0, 1.0] {
+        let tip = c + vec2(dir * 9.0, 0.0);
+        let base = c + vec2(dir * 3.0, 0.0);
+        painter.add(egui::Shape::convex_polygon(
+            // Clockwise winding (egui anti-aliases convex polygons along the outside).
+            vec![
+                tip,
+                base + vec2(0.0, 5.5 * dir),
+                base + vec2(0.0, -5.5 * dir),
+            ],
+            dark,
+            Stroke::NONE,
+        ));
+    }
 }

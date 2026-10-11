@@ -15,7 +15,7 @@ struct Args {
     input: PathBuf,
     /// Output TIFF.
     output: PathBuf,
-    #[arg(long, value_enum, default_value_t = Model::Psf)]
+    #[arg(long, value_enum, default_value_t = Model::Hybrid)]
     model: Model,
     /// PSF FWHM in pixels (1–8, steps of 0.25). Used by the psf and hybrid models.
     #[arg(long, default_value_t = 3.0)]

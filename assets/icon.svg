@@ -1,0 +1,48 @@
+<!-- AstroSharp app icon: a sharp star inside a focusing ring. Rendered by `make icon`. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+    <stop offset="0" stop-color="#26346a"/><stop offset="0.55" stop-color="#111733"/><stop offset="1" stop-color="#05060e"/>
+  </linearGradient>
+  <clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  <radialGradient id="glow"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="0.25" stop-color="#dfe9ff" stop-opacity="0.75"/><stop offset="1" stop-color="#9fb8ff" stop-opacity="0"/></radialGradient>
+  <radialGradient id="halo"><stop offset="0" stop-color="#cfe0ff" stop-opacity="0.55"/><stop offset="1" stop-color="#7f9cff" stop-opacity="0"/></radialGradient>
+  <linearGradient id="spikeH" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="0.5" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+  <linearGradient id="spikeV" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="0.5" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+  <filter id="blur" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="34"/></filter>
+  <filter id="soft" x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="6"/></filter>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%" color-interpolation-filters="sRGB"><feOffset dy="12"/><feGaussianBlur stdDeviation="14"/></filter>
+</defs>
+<!-- Drop shadow drawn separately so the background gradient is never filtered (avoids banding). -->
+<rect x="100" y="100" width="824" height="824" rx="185" fill="#000" opacity="0.35" filter="url(#shadow)"/>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+<g clip-path="url(#sq)">
+
+<circle cx="201" cy="708" r="6.6000000000000005" fill="#e8eeff" opacity="0.57" filter="url(#soft)"/>
+<circle cx="803" cy="768" r="6.6000000000000005" fill="#e8eeff" opacity="0.36" filter="url(#soft)"/>
+<circle cx="168" cy="700" r="9.9" fill="#e8eeff" opacity="0.68" filter="url(#soft)"/>
+<circle cx="768" cy="808" r="6.6000000000000005" fill="#e8eeff" opacity="0.62" filter="url(#soft)"/>
+<circle cx="530" cy="135" r="9.9" fill="#e8eeff" opacity="0.74" filter="url(#soft)"/>
+<circle cx="237" cy="231" r="13.200000000000001" fill="#e8eeff" opacity="0.71" filter="url(#soft)"/>
+<circle cx="735" cy="203" r="13.200000000000001" fill="#e8eeff" opacity="0.38" filter="url(#soft)"/>
+<circle cx="270" cy="153" r="5.5" fill="#e8eeff" opacity="0.60" filter="url(#soft)"/>
+<circle cx="835" cy="468" r="13.200000000000001" fill="#e8eeff" opacity="0.84" filter="url(#soft)"/>
+<circle cx="807" cy="847" r="13.200000000000001" fill="#e8eeff" opacity="0.80" filter="url(#soft)"/>
+<circle cx="357" cy="216" r="6.6000000000000005" fill="#e8eeff" opacity="0.82" filter="url(#soft)"/>
+<circle cx="318" cy="228" r="9.9" fill="#e8eeff" opacity="0.46" filter="url(#soft)"/>
+<circle cx="867" cy="432" r="9.9" fill="#e8eeff" opacity="0.43" filter="url(#soft)"/>
+<circle cx="674" cy="899" r="9.9" fill="#e8eeff" opacity="0.52" filter="url(#soft)"/>
+<circle cx="512" cy="512" r="300" fill="#000" opacity="0.25"/>
+<circle cx="554" cy="465" r="2.5" fill="#e8eeff" opacity="0.54"/>
+<circle cx="526" cy="352" r="2.5" fill="#e8eeff" opacity="0.41"/>
+<circle cx="438" cy="541" r="6" fill="#e8eeff" opacity="0.64"/>
+<circle cx="512" cy="512" r="122.99999999999999" fill="url(#halo)"/>
+<polygon points="266.0,512 512,506.26 758.0,512 512,517.74" fill="url(#spikeH)"/>
+<polygon points="512,266.0 506.26,512 512,758.0 517.74,512" fill="url(#spikeV)"/>
+<circle cx="512" cy="512" r="57.4" fill="url(#glow)"/>
+<circle cx="512" cy="512" r="18.04" fill="#fff"/>
+<circle cx="512" cy="512" r="300" fill="none" stroke="#ffc828" stroke-width="14"/>
+<line x1="812.0" y1="512.0" x2="867.0" y2="512.0" stroke="#ffc828" stroke-width="16" stroke-linecap="round"/><line x1="512.0" y1="812.0" x2="512.0" y2="867.0" stroke="#ffc828" stroke-width="16" stroke-linecap="round"/><line x1="212.0" y1="512.0" x2="157.0" y2="512.0" stroke="#ffc828" stroke-width="16" stroke-linecap="round"/><line x1="512.0" y1="212.0" x2="512.0" y2="157.0" stroke="#ffc828" stroke-width="16" stroke-linecap="round"/>
+</g>
+<rect x="100.5" y="100.5" width="823" height="823" rx="185" fill="none" stroke="#fff" stroke-opacity="0.08" stroke-width="2"/>
+</svg>

@@ -1,0 +1,11 @@
+# Standalone helper (not part of the main workspace) that renders assets/icon.svg.
+[package]
+name = "render-icon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+resvg = "0.48"

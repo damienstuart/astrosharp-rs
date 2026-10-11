@@ -32,6 +32,7 @@ struct Processed {
 }
 
 struct PreviewResult {
+    params: Params,
     roi: Roi,
     picture: Picture,
 }
@@ -109,6 +110,8 @@ pub struct AstroSharpApp {
     split: f32,
     /// Process only the preview region automatically; the full image on request.
     preview_only: bool,
+    /// Reprocess automatically when settings change.
+    live: bool,
     float_output: bool,
     preview: Option<PreviewResult>,
     preview_job: Option<Job>,
@@ -122,7 +125,10 @@ pub struct AstroSharpApp {
 impl AstroSharpApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        let params = Params::default();
+        let params = Params {
+            model: ModelKind::Hybrid,
+            ..Params::default()
+        };
         let mut app = AstroSharpApp {
             last_params: params.clone(),
             params,
@@ -132,6 +138,7 @@ impl AstroSharpApp {
             compare: false,
             split: 0.5,
             preview_only: false,
+            live: false,
             float_output: false,
             preview: None,
             preview_job: None,
@@ -172,8 +179,8 @@ impl AstroSharpApp {
                 self.preview_job = None;
                 self.full = None;
                 self.full_job = None;
+                self.update_requested = None;
                 self.view.fit();
-                self.request_update();
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
         }
@@ -182,6 +189,17 @@ impl AstroSharpApp {
     /// Reprocesses the image (or the preview region) once changes settle.
     fn request_update(&mut self) {
         self.update_requested = Some(Instant::now());
+    }
+
+    /// Whether the displayed result was made with different settings.
+    fn result_is_stale(&self) -> bool {
+        if self.preview_only {
+            self.preview
+                .as_ref()
+                .is_some_and(|p| p.params != self.params || Some(p.roi) != self.roi)
+        } else {
+            self.full.is_some() && !self.full_is_current()
+        }
     }
 
     fn full_is_current(&self) -> bool {
@@ -207,7 +225,11 @@ impl AstroSharpApp {
                 Ok((_, ci, step)) => {
                     let roi = job.roi.expect("preview jobs have a ROI");
                     let picture = Picture::new(ctx, "preview", ci, step, roi.w, roi.h);
-                    self.preview = Some(PreviewResult { roi, picture });
+                    self.preview = Some(PreviewResult {
+                        params: job.params.clone(),
+                        roi,
+                        picture,
+                    });
                 }
                 Err(e) if e != "cancelled" => self.status = format!("Preview failed: {e}"),
                 Err(_) => {}
@@ -276,7 +298,7 @@ impl AstroSharpApp {
         egui::ComboBox::from_label("Model")
             .selected_text(model_name(p.model))
             .show_ui(ui, |ui| {
-                for m in [ModelKind::Psf, ModelKind::AstroClean, ModelKind::Hybrid] {
+                for m in [ModelKind::Hybrid, ModelKind::Psf, ModelKind::AstroClean] {
                     ui.selectable_value(&mut p.model, m, model_name(m));
                 }
             });
@@ -312,17 +334,20 @@ impl AstroSharpApp {
                 );
             }
         }
+        ui.add_space(4.0);
+        if ui
+            .checkbox(&mut self.live, "Live update")
+            .on_hover_text("Reprocess automatically whenever a setting changes.")
+            .changed()
+            && self.live
+        {
+            self.request_update();
+        }
         ui.separator();
 
         ui.label("View");
-        ui.checkbox(&mut self.compare, "Compare before/after");
-        if self.compare {
-            ui.add(
-                egui::Slider::new(&mut self.split, 0.0..=1.0)
-                    .show_value(false)
-                    .text("Before | after"),
-            );
-        }
+        ui.checkbox(&mut self.compare, "Compare before/after")
+            .on_hover_text("Drag the divider on the image to move it.");
         if ui
             .checkbox(&mut self.preview_only, "Preview region only")
             .on_hover_text(
@@ -333,9 +358,14 @@ impl AstroSharpApp {
             if !self.preview_only {
                 self.preview_job = None;
             }
-            self.request_update();
+            if self.live {
+                self.request_update();
+            }
         }
         let mut help = String::from("Drag to pan, scroll to zoom, double-click to fit.\n");
+        if self.compare {
+            help += "Drag the divider to compare.\n";
+        }
         if self.preview_only {
             help += "Shift-drag or right-drag to choose the region.\n";
         }
@@ -349,15 +379,39 @@ impl AstroSharpApp {
                 self.full_job = None;
                 self.status = "Processing cancelled.".into();
             }
-        } else if self.preview_only
-            && ui
-                .add_enabled(
-                    self.loaded.is_some(),
-                    egui::Button::new("Process full image"),
-                )
-                .clicked()
-        {
-            self.start_full(ui.ctx());
+        } else {
+            let loaded = self.loaded.is_some();
+            ui.horizontal(|ui| {
+                if self.preview_only {
+                    if ui
+                        .add_enabled(loaded, egui::Button::new("Update preview"))
+                        .clicked()
+                    {
+                        self.request_update();
+                    }
+                    if ui
+                        .add_enabled(loaded, egui::Button::new("Process full image"))
+                        .clicked()
+                    {
+                        self.start_full(ui.ctx());
+                    }
+                } else if ui
+                    .add_enabled(
+                        loaded && !self.full_is_current(),
+                        egui::Button::new("Process image"),
+                    )
+                    .clicked()
+                {
+                    self.start_full(ui.ctx());
+                }
+            });
+        }
+        if !self.live && self.result_is_stale() {
+            ui.small(if self.preview_only {
+                "Settings or region changed since the last update."
+            } else {
+                "Settings changed since the last update."
+            });
         }
 
         let current = self.full.as_ref().filter(|f| f.params == self.params);
@@ -432,7 +486,9 @@ impl eframe::App for AstroSharpApp {
 
         if self.params != self.last_params {
             self.last_params = self.params.clone();
-            self.request_update();
+            if self.live {
+                self.request_update();
+            }
         }
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -454,11 +510,13 @@ impl eframe::App for AstroSharpApp {
                 original: &loaded.picture,
                 processed,
                 roi: self.roi.filter(|_| self.preview_only),
-                split: if self.compare { self.split } else { 0.0 },
+                split: self.compare.then_some(&mut self.split),
             };
             if let Some(roi) = viewer::show(ui, &mut self.view, layers) {
                 self.roi = Some(roi);
-                self.request_update();
+                if self.live {
+                    self.request_update();
+                }
             }
         });
     }

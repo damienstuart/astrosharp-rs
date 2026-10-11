@@ -21,6 +21,8 @@ in the binaries, so nothing else is needed at runtime: no R, no Electron.
 | `tools/export_weights.R` | Converts the `.RDS` models to `crates/core/weights/*.bin` |
 | `tools/make_golden.R` | Runs the original R functions headless to produce reference outputs |
 | `tools/bundle_macos.sh` | Builds an unsigned `AstroSharp.app` |
+| `tools/icon` | Standalone helper (uses `resvg`) that renders the icon SVG for `make icon` |
+| `assets/` | App icon: `icon.svg` (source), plus the generated `AppIcon.icns` and `icon-512.png` (window/Dock icon) |
 | `testdata/samples` | The sample TIFFs shipped with the R app |
 
 ## Usage
@@ -33,23 +35,25 @@ make release                 # build target/release/astrosharp and astrosharp-gu
 make app                     # target/release/bundle/AstroSharp.app (unsigned)
 make install                 # ...and copy it to /Applications (APP_DIR=... to change)
 make check                   # rustfmt check + clippy + tests
+make icon                    # re-render assets/icon.svg into AppIcon.icns + icon-512.png (commit the results)
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
 ```
 
 CLI example: `astrosharp in.tif out.tif --model hybrid --psf 3 --aggressiveness 0.66`.
 Options:
-- `--model psf|astroclean|hybrid`
+- `--model hybrid|psf|astroclean` (default `hybrid`)
 - `--psf <1..8 step 0.25>`
 - `--aggressiveness <0..1>`
 - `--mode seamless|parity`
 - `--chunk-size <n>` (Hybrid in parity mode only)
 - `--float` (write a 32-bit float TIFF)
 
-GUI:
-- **Processing:** the whole image is reprocessed automatically about 0.25 s after the last settings change. A progress bar with Cancel shows while it runs.
+GUI (Hybrid is the default model):
+- **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
+- **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
-- **Compare before/after** (off by default) adds an original | processed split slider.
-- **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image".
+- **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
+- **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
 - **Save as 32-bit float** writes float samples instead of 16-bit integers.
 - **Quit** closes the app.
 

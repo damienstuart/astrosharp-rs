@@ -6,9 +6,10 @@ R_APP   ?= ../AstroSharp/resources/app
 GOLDEN  := testdata/golden
 APP     := target/release/bundle/AstroSharp.app
 APP_DIR ?= /Applications
+ICONSET := target/AppIcon.iconset
 
 .DEFAULT_GOAL := help
-.PHONY: help build release test check lint fmt run cli app install golden weights clean
+.PHONY: help build release test check lint fmt run cli app icon install golden weights clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  \033[36m%-9s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -39,6 +40,12 @@ cli: release ## Build the CLI and show its options
 
 app: ## Build an unsigned macOS app bundle in target/release/bundle/
 	./tools/bundle_macos.sh
+
+icon: ## Render assets/icon.svg to assets/AppIcon.icns and assets/icon-512.png
+	rm -rf $(ICONSET)
+	$(CARGO) run --release --quiet --manifest-path tools/icon/Cargo.toml --target-dir target -- assets/icon.svg $(ICONSET)
+	iconutil -c icns $(ICONSET) -o assets/AppIcon.icns
+	cp $(ICONSET)/icon_256x256@2x.png assets/icon-512.png
 
 install: app ## Copy AstroSharp.app to /Applications (override with APP_DIR=...)
 	rm -rf "$(APP_DIR)/AstroSharp.app"
