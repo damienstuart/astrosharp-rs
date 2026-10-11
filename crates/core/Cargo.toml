@@ -1,0 +1,11 @@
+[package]
+name = "astrosharp-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+rayon.workspace = true
+matrixmultiply.workspace = true
+tiff.workspace = true

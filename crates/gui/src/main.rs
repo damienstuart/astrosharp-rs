@@ -1,0 +1,20 @@
+mod app;
+mod viewer;
+
+fn main() -> eframe::Result {
+    // Optional image to open at startup: `astrosharp-gui image.tif`.
+    let initial = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("AstroSharp")
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([800.0, 500.0])
+            .with_drag_and_drop(true),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "AstroSharp",
+        options,
+        Box::new(|cc| Ok(Box::new(app::AstroSharpApp::new(cc, initial)))),
+    )
+}
