@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use astrosharp_core::{
-    BitDepth, Mode, ModelKind, Params, Progress, process, read_tiff, write_tiff,
+    BitDepth, FileFormat, Mode, ModelKind, Params, Progress, SaveOptions, process, read_tiff,
+    save_image,
 };
 use clap::{Parser, ValueEnum};
 
@@ -13,7 +14,7 @@ use clap::{Parser, ValueEnum};
 struct Args {
     /// Input TIFF (grey or RGB; 8/16-bit integer or 32-bit float).
     input: PathBuf,
-    /// Output TIFF.
+    /// Output file; the format follows the extension (.tif/.tiff, .png, .jpg/.jpeg).
     output: PathBuf,
     #[arg(long, value_enum, default_value_t = Model::Hybrid)]
     model: Model,
@@ -29,9 +30,12 @@ struct Args {
     /// Chunk size for hybrid in parity mode.
     #[arg(long, default_value_t = 325)]
     chunk_size: usize,
-    /// Write 32-bit float samples instead of 16-bit integers.
+    /// Bits per sample: TIFF 8, 16 (default) or 32 (float); PNG 8 or 16 (default); JPEG 8.
     #[arg(long)]
-    float: bool,
+    depth: Option<u8>,
+    /// JPEG quality (1–100).
+    #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: u8,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -64,18 +68,36 @@ fn main() -> Result<()> {
         chunk_size: args.chunk_size,
     };
 
+    let format = FileFormat::from_path(&args.output).ok_or_else(|| {
+        anyhow!("unsupported output file type; use .tif, .tiff, .png, .jpg or .jpeg")
+    })?;
+    let depth = match args.depth {
+        None => format.default_depth(),
+        Some(8) => BitDepth::U8,
+        Some(16) => BitDepth::U16,
+        Some(32) => BitDepth::F32,
+        Some(d) => bail!("--depth must be 8, 16 or 32, not {d}"),
+    };
+    if !format.depths().contains(&depth) {
+        bail!(
+            "{} files cannot store {} samples",
+            format.name(),
+            depth.name()
+        );
+    }
+    let save = SaveOptions {
+        format,
+        depth,
+        jpeg_quality: args.quality,
+    };
+
     let t0 = Instant::now();
     let img =
         read_tiff(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
     let t1 = Instant::now();
     let out = process(&img, &params, &Progress::new())?;
     let t2 = Instant::now();
-    let depth = if args.float {
-        BitDepth::F32
-    } else {
-        BitDepth::U16
-    };
-    write_tiff(&args.output, &out, depth)
+    save_image(&args.output, &out, &save)
         .with_context(|| format!("writing {}", args.output.display()))?;
     let t3 = Instant::now();
 

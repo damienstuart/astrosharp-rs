@@ -8,7 +8,8 @@ use eframe::egui::{self, ColorImage, Pos2, pos2};
 use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
-    BitDepth, Image, Mode, ModelKind, Params, Progress, process, read_tiff, write_tiff,
+    BitDepth, FileFormat, Image, Mode, ModelKind, Params, Progress, SaveOptions, process,
+    read_tiff, save_image,
 };
 
 use crate::viewer::{self, Layers, Picture, Roi, View};
@@ -38,6 +39,12 @@ struct PreviewResult {
 }
 
 type JobOutput = Result<(Image, ColorImage, usize), String>;
+
+/// A save running in the background.
+struct SaveJob {
+    path: PathBuf,
+    rx: Receiver<Result<(), String>>,
+}
 
 struct Job {
     params: Params,
@@ -112,7 +119,12 @@ pub struct AstroSharpApp {
     preview_only: bool,
     /// Reprocess automatically when settings change.
     live: bool,
-    float_output: bool,
+    /// Output format for saving, with each format's own options.
+    save_format: FileFormat,
+    tiff_depth: BitDepth,
+    png_depth: BitDepth,
+    jpeg_quality: u8,
+    save_job: Option<SaveJob>,
     preview: Option<PreviewResult>,
     preview_job: Option<Job>,
     update_requested: Option<Instant>,
@@ -139,7 +151,11 @@ impl AstroSharpApp {
             split: 0.5,
             preview_only: false,
             live: false,
-            float_output: false,
+            save_format: FileFormat::Tiff,
+            tiff_depth: FileFormat::Tiff.default_depth(),
+            png_depth: FileFormat::Png.default_depth(),
+            jpeg_quality: SaveOptions::default().jpeg_quality,
+            save_job: None,
             preview: None,
             preview_job: None,
             update_requested: None,
@@ -218,6 +234,37 @@ impl AstroSharpApp {
         }
     }
 
+    /// Saves the current full-image result to `path` in the background. A recognised
+    /// extension in `path` picks the format; otherwise the selected format's is added.
+    fn start_save(&mut self, ctx: &egui::Context, mut path: PathBuf) {
+        let Some(full) = self.full.as_ref().filter(|f| f.params == self.params) else {
+            return;
+        };
+        let chosen = self.save_format;
+        let format = FileFormat::from_path(&path).unwrap_or_else(|| {
+            path.as_mut_os_string()
+                .push(format!(".{}", chosen.extensions()[0]));
+            chosen
+        });
+        let opts = SaveOptions {
+            format,
+            depth: match format {
+                FileFormat::Tiff => self.tiff_depth,
+                FileFormat::Png => self.png_depth,
+                FileFormat::Jpeg => BitDepth::U8,
+            },
+            jpeg_quality: self.jpeg_quality,
+        };
+        let (tx, rx) = mpsc::channel();
+        let (image, target, ctx) = (full.image.clone(), path.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(save_image(&target, &image, &opts).map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        self.save_job = Some(SaveJob { path, rx });
+        self.status = "Saving…".into();
+    }
+
     fn poll_jobs(&mut self, ctx: &egui::Context) {
         if let Some(out) = self.preview_job.as_ref().and_then(Job::poll) {
             let job = self.preview_job.take().unwrap();
@@ -274,7 +321,24 @@ impl AstroSharpApp {
                 }
             }
         }
-        if self.preview_job.is_some() || self.full_job.is_some() {
+        if let Some(job) = &self.save_job {
+            let result = match job.rx.try_recv() {
+                Ok(r) => Some(r),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err("save stopped unexpectedly".into())),
+            };
+            if let Some(result) = result {
+                let job = self.save_job.take().unwrap();
+                self.status = match result {
+                    Ok(()) => format!(
+                        "Saved {}",
+                        job.path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    Err(e) => format!("Save failed: {e}"),
+                };
+            }
+        }
+        if self.preview_job.is_some() || self.full_job.is_some() || self.save_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -414,32 +478,60 @@ impl AstroSharpApp {
             });
         }
 
-        let current = self.full.as_ref().filter(|f| f.params == self.params);
         ui.add_space(4.0);
-        ui.checkbox(&mut self.float_output, "Save as 32-bit float");
+        ui.horizontal(|ui| {
+            ui.label("Save as");
+            egui::ComboBox::from_id_salt("save-format")
+                .selected_text(self.save_format.name())
+                .show_ui(ui, |ui| {
+                    for f in FileFormat::ALL {
+                        ui.selectable_value(&mut self.save_format, f, f.name());
+                    }
+                });
+        });
+        match self.save_format {
+            FileFormat::Tiff => {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tiff_depth, BitDepth::U16, "16-bit")
+                        .on_hover_text("Integer samples, like the R app. Opens everywhere.");
+                    ui.selectable_value(&mut self.tiff_depth, BitDepth::F32, "32-bit float")
+                        .on_hover_text("Full precision, for further processing.");
+                });
+            }
+            FileFormat::Png => {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.png_depth, BitDepth::U16, "16-bit")
+                        .on_hover_text("Lossless, full precision.");
+                    ui.selectable_value(&mut self.png_depth, BitDepth::U8, "8-bit")
+                        .on_hover_text("Lossless; smaller files for sharing.");
+                });
+            }
+            FileFormat::Jpeg => {
+                ui.add(egui::Slider::new(&mut self.jpeg_quality, 50..=100).text("Quality"))
+                    .on_hover_text("Lossy 8-bit; smallest files.");
+            }
+        }
+
+        let current = self.full.as_ref().is_some_and(|f| f.params == self.params);
         if ui
-            .add_enabled(current.is_some(), egui::Button::new("Save processed TIFF…"))
+            .add_enabled(
+                current && self.save_job.is_none(),
+                egui::Button::new("Save processed image…"),
+            )
             .on_disabled_hover_text(
                 "Available once the full image has been processed with the current settings.",
             )
             .clicked()
-            && let (Some(full), Some(l)) = (current, &self.loaded)
+            && let Some(l) = &self.loaded
         {
+            let format = self.save_format;
             let stem = l.path.file_stem().unwrap_or_default().to_string_lossy();
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("TIFF", &["tif", "tiff"])
-                .set_file_name(format!("{stem}_sharpened.tif"))
-                .save_file()
-            {
-                let depth = if self.float_output {
-                    BitDepth::F32
-                } else {
-                    BitDepth::U16
-                };
-                self.status = match write_tiff(&path, &full.image, depth) {
-                    Ok(()) => format!("Saved {}", path.display()),
-                    Err(e) => format!("Save failed: {e}"),
-                };
+            let picked = rfd::FileDialog::new()
+                .add_filter(format.name(), format.extensions())
+                .set_file_name(format!("{stem}_sharpened.{}", format.extensions()[0]))
+                .save_file();
+            if let Some(path) = picked {
+                self.start_save(ui.ctx(), path);
             }
         }
 
@@ -449,6 +541,9 @@ impl AstroSharpApp {
                 ui.spinner();
                 ui.label("Updating preview…");
             });
+        }
+        if self.save_job.is_some() {
+            ui.spinner();
         }
         ui.label(&self.status);
 

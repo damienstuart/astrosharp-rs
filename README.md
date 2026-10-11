@@ -46,7 +46,9 @@ Options:
 - `--aggressiveness <0..1>`
 - `--mode seamless|parity`
 - `--chunk-size <n>` (Hybrid in parity mode only)
-- `--float` (write a 32-bit float TIFF)
+- Output format follows the file extension: `.tif`/`.tiff`, `.png` or `.jpg`/`.jpeg`
+- `--depth <8|16|32>`: TIFF 8, 16 (default) or 32 (float); PNG 8 or 16 (default); JPEG 8 only
+- `--quality <1..100>` (JPEG only, default 90)
 
 GUI (Hybrid is the default model):
 - **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
@@ -54,7 +56,12 @@ GUI (Hybrid is the default model):
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
-- **Save as 32-bit float** writes float samples instead of 16-bit integers.
+- **Save as** picks the output format:
+  - TIFF (default): 16-bit, or 32-bit float for further processing.
+  - PNG: lossless, 16-bit (default) or 8-bit.
+  - JPEG: quality 50–100 (default 90), written without chroma subsampling to keep small coloured stars crisp.
+
+  Saving runs in the background.
 - **Quit** closes the app.
 
 ## Fidelity to the R app

@@ -11,7 +11,7 @@ pub mod rround;
 pub mod weights;
 
 pub use image::{Image, Plane};
-pub use io::{BitDepth, read_tiff, write_tiff};
+pub use io::{BitDepth, FileFormat, SaveOptions, read_tiff, save_image, write_tiff};
 pub use pipeline::{Mode, ModelKind, Params, Progress, process, process_plane};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +20,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("TIFF error: {0}")]
     Tiff(#[from] tiff::TiffError),
+    #[error("PNG error: {0}")]
+    Png(#[from] png::EncodingError),
+    #[error("JPEG error: {0}")]
+    Jpeg(#[from] jpeg_encoder::EncodingError),
     #[error("unsupported image: {0}")]
     Unsupported(String),
     #[error("{0}")]

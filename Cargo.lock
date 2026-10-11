@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "astrosharp-core",
@@ -304,17 +304,20 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "jpeg-encoder",
  "matrixmultiply",
+ "png",
  "rayon",
  "thiserror 2.0.21",
  "tiff",
+ "zune-jpeg",
 ]
 
 [[package]]
 name = "astrosharp-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "astrosharp-core",
  "eframe",
@@ -1747,6 +1750,12 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
 
 [[package]]
 name = "js-sys"
