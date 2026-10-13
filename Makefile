@@ -38,7 +38,7 @@ run: ## Run the GUI; open an image with `make run IMAGE=path.tif`
 cli: release ## Build the CLI and show its options
 	./target/release/astrosharp --help
 
-app: ## Build an unsigned macOS app bundle in target/release/bundle/
+app: ## Build an unsigned macOS app bundle (GUI + CLI) in target/release/bundle/
 	./tools/bundle_macos.sh
 
 icon: ## Render assets/icon.svg to assets/AppIcon.icns and assets/icon-512.png

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Builds an unsigned AstroSharp.app for local use in target/release/bundle/.
+# The CLI is bundled too, as Contents/MacOS/astrosharp-cli (a distinct name: macOS file
+# systems are usually case-insensitive, so "astrosharp" would overwrite "AstroSharp").
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release -p astrosharp-gui
+cargo build --release -p astrosharp-gui -p astrosharp-cli
 
 version=$(cargo metadata --no-deps --format-version 1 |
     python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "astrosharp-gui"))')
@@ -11,6 +13,7 @@ app=target/release/bundle/AstroSharp.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/astrosharp-gui "$app/Contents/MacOS/AstroSharp"
+cp target/release/astrosharp "$app/Contents/MacOS/astrosharp-cli"
 cp assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 cat > "$app/Contents/Info.plist" <<EOF

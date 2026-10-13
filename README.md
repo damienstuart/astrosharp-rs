@@ -46,6 +46,9 @@ make icon                    # re-render assets/icon.svg into AppIcon.icns + ico
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
 ```
 
+The app bundle also contains the CLI, at `/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli`
+after `make install` (the Siril script uses it from there).
+
 CLI example: `astrosharp in.fit out.fit --model hybrid --psf 3 --aggressiveness 0.66`.
 The input can be TIFF or FITS (`.fit`/`.fits`/`.fts`).
 Options:
