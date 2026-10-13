@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "astrosharp-core",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "jpeg-encoder",
  "matrixmultiply",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-gui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "astrosharp-core",
  "eframe",

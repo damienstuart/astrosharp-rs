@@ -30,6 +30,41 @@ struct Loaded {
     picture: Picture,
 }
 
+impl Loaded {
+    /// Reads `path` and prepares it for display.
+    fn read(ctx: &egui::Context, path: &Path) -> Result<Loaded, String> {
+        let (img, fits) = read_image(path).map_err(|e| e.to_string())?;
+        if img.width < MIN_SIZE || img.height < MIN_SIZE {
+            return Err(format!("image too small (minimum {MIN_SIZE}x{MIN_SIZE})"));
+        }
+        let max_side = ctx.input(|i| i.max_texture_side);
+        let (ci, step) = Picture::color_image(&img, max_side);
+        Ok(Loaded {
+            path: path.to_path_buf(),
+            linear: img.looks_linear(),
+            picture: Picture::new(ctx, "original", ci, step, img.width, img.height),
+            image: Arc::new(img),
+            fits,
+        })
+    }
+
+    /// File name, size and type, for the status line.
+    fn summary(&self) -> String {
+        let img = &self.image;
+        let mut s = format!(
+            "{} — {}x{} {}",
+            self.path.file_name().unwrap_or_default().to_string_lossy(),
+            img.width,
+            img.height,
+            if img.is_color() { "RGB" } else { "grey" }
+        );
+        if let Some(depth) = self.fits.as_ref().and_then(FitsHeader::source_depth) {
+            s += &format!(" (FITS, {})", depth.name());
+        }
+        s
+    }
+}
+
 struct Processed {
     params: Params,
     image: Arc<Image>,
@@ -142,10 +177,7 @@ pub struct AstroSharpApp {
 impl AstroSharpApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        let params = Params {
-            model: ModelKind::Hybrid,
-            ..Params::default()
-        };
+        let params = default_params();
         let mut app = AstroSharpApp {
             last_params: params.clone(),
             params,
@@ -176,44 +208,57 @@ impl AstroSharpApp {
     }
 
     fn open(&mut self, ctx: &egui::Context, path: &Path) {
-        match read_image(path) {
-            Ok((img, _)) if img.width < MIN_SIZE || img.height < MIN_SIZE => {
-                self.status = format!("Image too small (minimum {MIN_SIZE}x{MIN_SIZE}).");
-            }
-            Ok((img, fits)) => {
-                let max_side = ctx.input(|i| i.max_texture_side);
-                let (ci, step) = Picture::color_image(&img, max_side);
-                let picture = Picture::new(ctx, "original", ci, step, img.width, img.height);
-                self.roi = Some(Roi::default_for(img.width, img.height));
-                self.status = format!(
-                    "{} — {}x{} {}",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    img.width,
-                    img.height,
-                    if img.is_color() { "RGB" } else { "grey" }
-                );
+        match Loaded::read(ctx, path) {
+            Ok(loaded) => {
                 // Default to saving FITS like the source, so its header is kept.
-                if let Some(depth) = fits.as_ref().and_then(FitsHeader::source_depth) {
+                if let Some(depth) = loaded.fits.as_ref().and_then(FitsHeader::source_depth) {
                     self.save_format = FileFormat::Fits;
                     self.fits_depth = depth;
-                    self.status += &format!(" (FITS, {})", depth.name());
                 }
-                self.loaded = Some(Loaded {
-                    path: path.to_path_buf(),
-                    linear: img.looks_linear(),
-                    image: Arc::new(img),
-                    fits,
-                    picture,
-                });
-                self.preview = None;
-                self.preview_job = None;
-                self.full = None;
-                self.full_job = None;
-                self.update_requested = None;
-                self.view.fit();
+                self.show_original(loaded);
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
         }
+    }
+
+    /// Discards any results, restores the default settings and reloads the open file from
+    /// disk. If the file can no longer be read, the image as first loaded is shown instead.
+    fn reset(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.loaded.as_ref().map(|l| l.path.clone()) else {
+            return;
+        };
+        self.params = default_params();
+        // Not a settings change: Live update shouldn't reprocess straight away.
+        self.last_params = self.params.clone();
+        match Loaded::read(ctx, &path) {
+            Ok(loaded) => self.show_original(loaded),
+            Err(e) => {
+                self.discard_results();
+                self.view.fit();
+                self.status = format!(
+                    "Could not reload {}: {e}. Showing the image as first loaded.",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+        }
+    }
+
+    /// Shows `loaded` as the original, with a fresh view and no results.
+    fn show_original(&mut self, loaded: Loaded) {
+        self.roi = Some(Roi::default_for(loaded.image.width, loaded.image.height));
+        self.status = loaded.summary();
+        self.loaded = Some(loaded);
+        self.discard_results();
+        self.view.fit();
+    }
+
+    /// Drops the processed results and cancels any processing in progress.
+    fn discard_results(&mut self) {
+        self.preview = None;
+        self.preview_job = None;
+        self.full = None;
+        self.full_job = None;
+        self.update_requested = None;
     }
 
     /// Reprocesses the image (or the preview region) once changes settle.
@@ -380,6 +425,16 @@ impl AstroSharpApp {
                     .pick_file()
             {
                 self.open(ui.ctx(), &path);
+            }
+            if ui
+                .add_enabled(self.loaded.is_some(), egui::Button::new("Reset"))
+                .on_hover_text(
+                    "Discard the processed result, restore the default settings and \
+                     reload the image from disk.",
+                )
+                .clicked()
+            {
+                self.reset(ui.ctx());
             }
         });
         ui.separator();
@@ -596,6 +651,14 @@ impl AstroSharpApp {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
+    }
+}
+
+/// The R app's defaults, but with the Hybrid model.
+fn default_params() -> Params {
+    Params {
+        model: ModelKind::Hybrid,
+        ..Params::default()
     }
 }
 

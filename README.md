@@ -72,6 +72,9 @@ GUI (Hybrid is the default model):
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
 - **Open image…** (or drop a file on the window) accepts TIFF and FITS.
+- **Reset** discards the processed result, cancelling any processing in progress, and reloads the image from disk, for example after you've changed it in another program. If the file can no longer be read, the image as first loaded is shown.
+  - The model settings go back to their defaults: Hybrid, PSF 3, Aggressiveness 0.66, Seamless.
+  - The view options and the Save as choice are kept. With Live update on, nothing is reprocessed until you change a setting.
 - **Save as** picks the output format:
   - TIFF (default): 16-bit, or 32-bit float for further processing.
   - FITS: 32-bit float or 16-bit. This is selected automatically, at the source's depth, when you open a FITS file.
