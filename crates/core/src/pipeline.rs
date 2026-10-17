@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
+use tracing::{debug_span, info_span};
 
 use crate::features::{self, N_FEATURES, RADIUS};
 use crate::model::{Mlp, Scratch};
@@ -126,6 +127,20 @@ impl Progress {
 
 /// Processes a grey or RGB image. Colour images are converted to CIE Luv and only the
 /// lightness channel is processed, as in the R app.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        width = img.width,
+        height = img.height,
+        color = img.is_color(),
+        model = ?params.model,
+        psf_fwhm = (params.model != ModelKind::AstroClean).then_some(params.psf_fwhm),
+        aggressiveness = params.aggressiveness,
+        mode = ?params.mode,
+        chunk_size = (params.model == ModelKind::Hybrid && params.mode == Mode::Parity)
+            .then_some(params.chunk_size),
+    )
+)]
 pub fn process(img: &Image, params: &Params, progress: &Progress) -> Result<Image, Error> {
     if img.width < MIN_SIZE || img.height < MIN_SIZE {
         return Err(Error::InvalidParams(format!(
@@ -137,25 +152,27 @@ pub fn process(img: &Image, params: &Params, progress: &Progress) -> Result<Imag
         let out = process_plane(&Plane::new(w, h, img.data.clone()), params, progress)?;
         return Ok(Image::new(w, h, 1, out.data));
     }
-    let luv: Vec<[f64; 3]> = img
-        .data
-        .par_chunks_exact(3)
-        .map(|p| color::srgb_to_luv([p[0], p[1], p[2]]))
-        .collect();
+    let luv: Vec<[f64; 3]> = info_span!("to_luv").in_scope(|| {
+        img.data
+            .par_chunks_exact(3)
+            .map(|p| color::srgb_to_luv([p[0], p[1], p[2]]))
+            .collect()
+    });
     let lightness = Plane::new(w, h, luv.iter().map(|p| p[0] / 100.0).collect());
     let out = process_plane(&lightness, params, progress)?;
-    let data = luv
-        .par_iter()
-        .zip(&out.data)
-        .flat_map_iter(|(p, &l)| {
-            let luv = [l * 100.0, p[1], p[2]];
-            // R rounds to 5 decimals; only parity mode reproduces that.
-            match params.mode {
-                Mode::Parity => color::luv_to_srgb(luv),
-                Mode::Seamless => color::luv_to_srgb_unrounded(luv),
-            }
-        })
-        .collect();
+    let data = info_span!("from_luv").in_scope(|| {
+        luv.par_iter()
+            .zip(&out.data)
+            .flat_map_iter(|(p, &l)| {
+                let luv = [l * 100.0, p[1], p[2]];
+                // R rounds to 5 decimals; only parity mode reproduces that.
+                match params.mode {
+                    Mode::Parity => color::luv_to_srgb(luv),
+                    Mode::Seamless => color::luv_to_srgb_unrounded(luv),
+                }
+            })
+            .collect()
+    });
     Ok(Image::new(w, h, 3, data))
 }
 
@@ -173,8 +190,12 @@ pub fn process_plane(plane: &Plane, params: &Params, progress: &Progress) -> Res
         )));
     }
     match params.model {
-        ModelKind::Psf => single(weights::psf(params.psf_fwhm)?, plane, a, progress),
-        ModelKind::AstroClean => single(weights::astroclean(), plane, a, progress),
+        ModelKind::Psf => {
+            let psf = weights::psf(params.psf_fwhm)?;
+            info_span!("psf_pass").in_scope(|| single(psf, plane, a, progress))
+        }
+        ModelKind::AstroClean => info_span!("astroclean_pass")
+            .in_scope(|| single(weights::astroclean(), plane, a, progress)),
         ModelKind::Hybrid => {
             let psf = weights::psf(params.psf_fwhm)?;
             let clean = weights::astroclean();
@@ -249,15 +270,18 @@ fn hybrid_seamless(
     let (rows, cols) = (kept(h), kept(w));
     progress.start(w * h + rows.len() * cols.len());
     let padded = plane.padded(RADIUS);
-    let sharp = eval_windows(
-        psf,
-        &padded,
-        RADIUS..h + RADIUS,
-        RADIUS..w + RADIUS,
-        progress,
-    )?;
+    let sharp = info_span!("psf_pass").in_scope(|| {
+        eval_windows(
+            psf,
+            &padded,
+            RADIUS..h + RADIUS,
+            RADIUS..w + RADIUS,
+            progress,
+        )
+    })?;
     let sharp = Plane::new(w, h, sharp);
-    let cleaned = eval_windows(clean, &sharp, rows.clone(), cols.clone(), progress)?;
+    let cleaned = info_span!("astroclean_pass")
+        .in_scope(|| eval_windows(clean, &sharp, rows.clone(), cols.clone(), progress))?;
     let mut out = Plane::new(
         w,
         h,
@@ -314,11 +338,13 @@ fn hybrid_parity(
     let work: usize = col_spans.iter().map(interior).sum::<usize>()
         * row_spans.iter().map(interior).sum::<usize>();
     progress.start(2 * work);
+    let _span = info_span!("hybrid_parity", chunks = row_spans.len() * col_spans.len()).entered();
 
     let mut sharp = Plane::zeros(padded.width, padded.height);
     let mut cleaned = Plane::zeros(padded.width, padded.height);
     for cs in &col_spans {
         for rs in &row_spans {
+            let _chunk = debug_span!("chunk", rows = ?rs, cols = ?cs).entered();
             let mut chunk = padded.sub(rs.clone(), cs.clone());
             let ir = RADIUS..chunk.height - RADIUS;
             let ic = RADIUS..chunk.width - RADIUS;

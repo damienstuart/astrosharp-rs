@@ -7,6 +7,7 @@ use astrosharp_core::{
     process, read_image, save_image,
 };
 use clap::{Parser, ValueEnum};
+use tracing::field::Empty;
 
 /// Sharpen and denoise astronomical images with the AstroSharp models.
 ///
@@ -73,7 +74,26 @@ fn main() -> Result<()> {
         },
         chunk_size: args.chunk_size,
     };
+    let _telemetry = astrosharp_telemetry::init("astrosharp-cli");
+    let span = tracing::info_span!(
+        "run",
+        input = %args.input.display(),
+        output = %args.output.display(),
+        params = %params.describe(),
+        width = Empty,
+        height = Empty,
+        color = Empty,
+        linear = Empty,
+        otel.status_description = Empty,
+    );
+    let result = span.in_scope(|| run(&args, &params));
+    if let Err(e) = &result {
+        astrosharp_telemetry::record_error(&span, &format_args!("{e:#}"));
+    }
+    result
+}
 
+fn run(args: &Args, params: &Params) -> Result<()> {
     let format = FileFormat::from_path(&args.output).ok_or_else(|| {
         anyhow!(
             "unsupported output file type; use .tif, .tiff, .fit, .fits, .fts, .png, .jpg or .jpeg"
@@ -95,7 +115,13 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     let (img, fits) =
         read_image(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
-    if img.looks_linear() {
+    let linear = img.looks_linear();
+    tracing::Span::current()
+        .record("width", img.width)
+        .record("height", img.height)
+        .record("color", img.is_color())
+        .record("linear", linear);
+    if linear {
         eprintln!(
             "note: {} looks linear (unstretched). AstroSharp is meant for stretched images; \
              stretch it first for best results.",
@@ -103,7 +129,7 @@ fn main() -> Result<()> {
         );
     }
     let t1 = Instant::now();
-    let out = process(&img, &params, &Progress::new())?;
+    let out = process(&img, params, &Progress::new())?;
     let t2 = Instant::now();
     // FITS output keeps a FITS input's sample type unless --depth says otherwise.
     let source_depth = fits

@@ -161,17 +161,41 @@ pub fn read_tiff(path: impl AsRef<Path>) -> Result<Image, Error> {
 
 /// Reads a TIFF or FITS image (chosen by extension). FITS files also return their
 /// header, so it can be preserved when saving.
+#[tracing::instrument(
+    skip_all,
+    fields(path = %path.as_ref().display(), format, width, height, channels)
+)]
 pub fn read_image(path: impl AsRef<Path>) -> Result<(Image, Option<FitsHeader>), Error> {
-    if FileFormat::from_path(&path) == Some(FileFormat::Fits) {
+    let (img, header) = if FileFormat::from_path(&path) == Some(FileFormat::Fits) {
         let (img, header) = fits::read_fits(path)?;
-        Ok((img, Some(header)))
+        (img, Some(header))
     } else {
-        Ok((read_tiff(path)?, None))
-    }
+        (read_tiff(path)?, None)
+    };
+    let format = if header.is_some() {
+        FileFormat::Fits
+    } else {
+        FileFormat::Tiff
+    };
+    tracing::Span::current()
+        .record("format", format.name())
+        .record("width", img.width)
+        .record("height", img.height)
+        .record("channels", img.channels);
+    Ok((img, header))
 }
 
 /// Saves `img` (values clipped to [0, 1]) in the format and depth given by `opts`.
 /// `fits` supplies the header (and extensions) to preserve when writing FITS.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        path = %path.as_ref().display(),
+        format = opts.format.name(),
+        depth = opts.depth.name(),
+        jpeg_quality = (opts.format == FileFormat::Jpeg).then_some(opts.jpeg_quality),
+    )
+)]
 pub fn save_image(
     path: impl AsRef<Path>,
     img: &Image,

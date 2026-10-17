@@ -10,5 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 astrosharp-core.workspace = true
+astrosharp-telemetry.workspace = true
 eframe.workspace = true
 rfd.workspace = true
+tracing.workspace = true

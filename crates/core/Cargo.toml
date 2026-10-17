@@ -11,6 +11,7 @@ matrixmultiply.workspace = true
 tiff.workspace = true
 png.workspace = true
 jpeg-encoder.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 zune-jpeg.workspace = true

@@ -175,6 +175,18 @@ pub fn read_fits(path: impl AsRef<Path>) -> Result<(Image, FitsHeader), Error> {
     for v in &mut data {
         *v = if v.is_nan() { 0.0 } else { *v / divisor };
     }
+    tracing::debug!(
+        bitpix,
+        width = w,
+        height = h,
+        planes,
+        top_down,
+        extension_bytes = extensions.len(),
+        "read FITS"
+    );
+    if float_scale != 1.0 {
+        tracing::info!(float_scale, "FITS float data is not in 0–1; scaled down");
+    }
     let channels = if planes == 3 { 3 } else { 1 };
     let header = FitsHeader {
         cards: cards
@@ -254,6 +266,12 @@ pub fn write_fits(
         ));
     }
     cards.push(pad("END".into()));
+    tracing::debug!(
+        cards = cards.len(),
+        kept = src.cards.len(),
+        extension_bytes = src.extensions.len(),
+        "writing FITS header"
+    );
 
     let mut out = BufWriter::new(File::create(path)?);
     let mut header_bytes: Vec<u8> = cards.concat().into_bytes();

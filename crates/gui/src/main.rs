@@ -2,6 +2,7 @@ mod app;
 mod viewer;
 
 fn main() -> eframe::Result {
+    let telemetry = astrosharp_telemetry::init("astrosharp-gui");
     // Optional image to open at startup: `astrosharp-gui image.tif`.
     let initial = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     // Window/Dock icon when not running from the app bundle (`make icon` regenerates it).
@@ -19,6 +20,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "AstroSharp",
         options,
-        Box::new(|cc| Ok(Box::new(app::AstroSharpApp::new(cc, initial)))),
+        Box::new(|cc| Ok(Box::new(app::AstroSharpApp::new(cc, initial, telemetry)))),
     )
 }

@@ -4,13 +4,16 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, ColorImage, Pos2, pos2};
+use tracing::field::Empty;
+use tracing::info_span;
 
 use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
-    BitDepth, FileFormat, FitsHeader, Image, Mode, ModelKind, Params, Progress, SaveOptions,
+    BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, Params, Progress, SaveOptions,
     VERSION, process, read_image, save_image,
 };
+use astrosharp_telemetry::{Telemetry, record_error};
 
 use crate::viewer::{self, Layers, Picture, Roi, View};
 
@@ -33,19 +36,36 @@ struct Loaded {
 impl Loaded {
     /// Reads `path` and prepares it for display.
     fn read(ctx: &egui::Context, path: &Path) -> Result<Loaded, String> {
-        let (img, fits) = read_image(path).map_err(|e| e.to_string())?;
-        if img.width < MIN_SIZE || img.height < MIN_SIZE {
-            return Err(format!("image too small (minimum {MIN_SIZE}x{MIN_SIZE})"));
+        let span = info_span!(
+            "open_image",
+            path = %path.display(),
+            linear = Empty,
+            otel.status_description = Empty,
+        );
+        let result = span.in_scope(|| {
+            let (img, fits) = read_image(path).map_err(|e| e.to_string())?;
+            if img.width < MIN_SIZE || img.height < MIN_SIZE {
+                return Err(format!("image too small (minimum {MIN_SIZE}x{MIN_SIZE})"));
+            }
+            let linear = img.looks_linear();
+            span.record("linear", linear);
+            let max_side = ctx.input(|i| i.max_texture_side);
+            let picture = info_span!("prepare_display").in_scope(|| {
+                let (ci, step) = Picture::color_image(&img, max_side);
+                Picture::new(ctx, "original", ci, step, img.width, img.height)
+            });
+            Ok(Loaded {
+                path: path.to_path_buf(),
+                linear,
+                picture,
+                image: Arc::new(img),
+                fits,
+            })
+        });
+        if let Err(e) = &result {
+            record_error(&span, e);
         }
-        let max_side = ctx.input(|i| i.max_texture_side);
-        let (ci, step) = Picture::color_image(&img, max_side);
-        Ok(Loaded {
-            path: path.to_path_buf(),
-            linear: img.looks_linear(),
-            picture: Picture::new(ctx, "original", ci, step, img.width, img.height),
-            image: Arc::new(img),
-            fits,
-        })
+        result
     }
 
     /// File name, size and type, for the status line.
@@ -99,7 +119,16 @@ impl Job {
         let progress = Arc::new(Progress::new());
         let (ctx, p, pr) = (ctx.clone(), params.clone(), progress.clone());
         let max_side = ctx.input(|i| i.max_texture_side);
+        let span = info_span!(
+            "process_job",
+            kind = if roi.is_some() { "preview" } else { "full" },
+            params = %params.describe(),
+            roi = roi.map(|r| format!("{}x{} at {},{}", r.w, r.h, r.x, r.y)),
+            outcome = Empty,
+            otel.status_description = Empty,
+        );
         std::thread::spawn(move || {
+            let _enter = span.enter();
             let result = match roi {
                 None => process(&image, &p, &pr),
                 Some(roi) => {
@@ -115,8 +144,18 @@ impl Job {
                     })
                 }
             };
+            let outcome = match &result {
+                Ok(_) => "ok",
+                Err(Error::Cancelled) => "cancelled",
+                Err(e) => {
+                    record_error(&span, e);
+                    "failed"
+                }
+            };
+            span.record("outcome", outcome);
             let msg = result.map_err(|e| e.to_string()).map(|img| {
-                let (ci, step) = Picture::color_image(&img, max_side);
+                let (ci, step) =
+                    info_span!("prepare_display").in_scope(|| Picture::color_image(&img, max_side));
                 (img, ci, step)
             });
             let _ = tx.send(msg);
@@ -172,10 +211,16 @@ pub struct AstroSharpApp {
     full_job: Option<Job>,
     last_params: Params,
     status: String,
+    /// Flushed on exit: Cmd-Q on macOS never returns from the event loop to `main`.
+    telemetry: Telemetry,
 }
 
 impl AstroSharpApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: Option<PathBuf>,
+        telemetry: Telemetry,
+    ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let params = default_params();
         let mut app = AstroSharpApp {
@@ -200,6 +245,7 @@ impl AstroSharpApp {
             full: None,
             full_job: None,
             status: "Open a TIFF or FITS file (or drop one on the window) to begin.".into(),
+            telemetry,
         };
         if let Some(path) = initial {
             app.open(&cc.egui_ctx, &path);
@@ -227,6 +273,7 @@ impl AstroSharpApp {
         let Some(path) = self.loaded.as_ref().map(|l| l.path.clone()) else {
             return;
         };
+        let _span = info_span!("reset").entered();
         self.params = default_params();
         // Not a settings change: Live update shouldn't reprocess straight away.
         self.last_params = self.params.clone();
@@ -327,8 +374,16 @@ impl AstroSharpApp {
         });
         let (tx, rx) = mpsc::channel();
         let (image, target, ctx) = (full.image.clone(), path.clone(), ctx.clone());
+        let span = info_span!(
+            "save_job",
+            path = %path.display(),
+            otel.status_description = Empty,
+        );
         std::thread::spawn(move || {
-            let result = save_image(&target, &image, &opts, header.as_ref());
+            let result = span.in_scope(|| save_image(&target, &image, &opts, header.as_ref()));
+            if let Err(e) = &result {
+                record_error(&span, e);
+            }
             let _ = tx.send(result.map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
@@ -720,5 +775,9 @@ impl eframe::App for AstroSharpApp {
                 }
             }
         });
+    }
+
+    fn on_exit(&mut self) {
+        self.telemetry.shutdown();
     }
 }

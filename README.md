@@ -25,6 +25,7 @@ Images that look linear trigger a note in the GUI and on the CLI's stderr: the w
 | `crates/core` | Library: MLP inference, 9x9 feature windows, pipeline, sRGB↔Luv, TIFF I/O, embedded weights |
 | `crates/cli` | `astrosharp` command-line tool |
 | `crates/gui` | `astrosharp-gui` desktop app (egui/eframe) |
+| `crates/telemetry` | Tracing setup shared by the CLI and GUI: stderr logging and OpenTelemetry export |
 | `tools/export_weights.R` | Converts the `.RDS` models to `crates/core/weights/*.bin` |
 | `tools/make_golden.R` | Runs the original R functions headless to produce reference outputs |
 | `tools/bundle_macos.sh` | Builds an unsigned `AstroSharp.app` |
@@ -98,6 +99,37 @@ GUI (Hybrid is the default model):
 
   Plate solutions (WCS/SIP), observation details and history are therefore kept, and any HDUs after the image are copied unchanged.
 - **Linear data:** see [Recommended workflow](#recommended-workflow).
+
+## Tracing (OpenTelemetry)
+
+The CLI and GUI can send traces of what they do to an OpenTelemetry endpoint such as
+[VictoriaTraces](https://docs.victoriametrics.com/victoriatraces/). Nothing is sent unless an endpoint is configured.
+
+- **Configuration:** set the standard variables in the environment, or in `~/.config/astrosharp/otel.env` (under `$XDG_CONFIG_HOME` if that's set).
+  - Apps launched from Finder don't see shell variables, so use the file for AstroSharp.app, and for the bundled CLI when Siril runs it.
+  - An endpoint in the environment overrides the file's.
+
+  ```sh
+  # ~/.config/astrosharp/otel.env (KEY=value lines; # starts a comment)
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:10428/insert/opentelemetry
+  ```
+- **Settings:**
+  - `OTEL_EXPORTER_OTLP_ENDPOINT` is a base URL; `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is a full URL, used as is.
+  - `OTEL_EXPORTER_OTLP_HEADERS` (`key=value,key=value`) and `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds, default 5000).
+  - `OTEL_SDK_DISABLED=true` turns export off.
+  - `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` work from the environment only.
+- **Transport:** OTLP over plain `http://`, protobuf-encoded. HTTPS and gRPC aren't built in.
+- **Services:** `astrosharp-cli` and `astrosharp-gui`, tagged with `service.version`.
+- **Spans** cover each operation and processing stage:
+  - The CLI's `run` span has `read_image`, `process` and `save_image` as children.
+  - In the GUI, `open_image`, `process_job` (full image or preview, with an `outcome` of ok, cancelled or failed), `save_job` and `reset` each start their own trace.
+  - Under `process`: `to_luv` and `from_luv` (colour only), `psf_pass` and `astroclean_pass`, or `hybrid_parity` in R parity mode.
+  - Failures mark the top span as an error, with the message.
+- **Detail:** `ASTROSHARP_TRACE` filters what is exported, using [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (default `astrosharp=info`).
+  - `ASTROSHARP_TRACE=astrosharp=debug` adds a span per parity-mode chunk and FITS header details.
+  - It can also go in `otel.env`.
+- **Logging:** warnings and errors, including failed exports, go to stderr; `RUST_LOG` changes the level (default `warn`).
+- **Privacy:** traces include the full paths of the files you open and save.
 
 ## Fidelity to the R app
 
