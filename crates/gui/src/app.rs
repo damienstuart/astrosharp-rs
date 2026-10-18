@@ -275,7 +275,7 @@ impl AstroSharpApp {
         let Some(path) = self.loaded.as_ref().map(|l| l.path.clone()) else {
             return;
         };
-        let _span = info_span!("reset").entered();
+        let _span = info_span!("reset", path = %path.display()).entered();
         self.params = default_params();
         // Not a settings change: Live update shouldn't reprocess straight away.
         self.last_params = self.params.clone();
