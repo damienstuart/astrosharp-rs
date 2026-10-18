@@ -70,6 +70,8 @@ GUI (Hybrid is the default model):
 - **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
   - The buttons are colour-coded by what they do: blue processes, amber discards the result, red discards the result and the settings.
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
+  - Changing only Aggressiveness reuses the last run's neural-network results, so the update takes a fraction of a second (about 0.1 s at 20 MP, compared with 1.7 s for a full Hybrid run). The result is identical to processing from scratch.
+  - A change made while the first run is still going waits for it to finish, rather than starting over.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Cursor readout** (bottom left): the pixel under the cursor, counted from the top-left like Siril, and the zoom.
   - For a plate-solved FITS file it also shows the sky coordinates, e.g. `α 23h59m47s  δ +66°42'41"`, matching Siril's readout. The status line says "plate-solved" for such files.

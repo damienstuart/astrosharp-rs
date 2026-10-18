@@ -10,8 +10,8 @@ use tracing::info_span;
 use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
-    BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, Params, Progress, SaveOptions,
-    VERSION, Wcs, process, read_image, save_image,
+    BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, NetKey, NetOutputs, Params,
+    Progress, SaveOptions, VERSION, Wcs, process_with, read_image, save_image,
 };
 use astrosharp_telemetry::{Telemetry, record_error};
 
@@ -125,7 +125,9 @@ struct PreviewResult {
     picture: Picture,
 }
 
-type JobOutput = Result<(Image, ColorImage, usize), String>;
+/// The processed image, its display version and downsampling step, and the network
+/// outputs the job computed (if it didn't reuse earlier ones).
+type JobOutput = Result<(Image, ColorImage, usize, Option<Arc<NetOutputs>>), String>;
 
 /// A save running in the background.
 struct SaveJob {
@@ -136,14 +138,27 @@ struct SaveJob {
 struct Job {
     params: Params,
     roi: Option<Roi>,
+    /// The settings its network outputs depend on.
+    key: NetKey,
+    /// It is running the networks, rather than reusing earlier outputs.
+    computing: bool,
     progress: Arc<Progress>,
     rx: Receiver<JobOutput>,
     started: Instant,
 }
 
 impl Job {
-    fn spawn(ctx: &egui::Context, loaded: &Loaded, params: Params, roi: Option<Roi>) -> Job {
+    /// Processes `loaded` (or the preview region `roi` of it) in the background, reusing
+    /// `cached` network outputs if they fit these settings.
+    fn spawn(
+        ctx: &egui::Context,
+        loaded: &Loaded,
+        params: Params,
+        roi: Option<Roi>,
+        cached: Option<Arc<NetOutputs>>,
+    ) -> Job {
         let (tx, rx) = mpsc::channel();
+        let computing = cached.is_none();
         let progress = Arc::new(Progress::new());
         let (ctx, p, pr) = (ctx.clone(), params.clone(), progress.clone());
         let image = loaded.image.clone();
@@ -154,23 +169,26 @@ impl Job {
             path = %loaded.path.display(),
             params = %params.describe(),
             roi = roi.map(|r| format!("{}x{} at {},{}", r.w, r.h, r.x, r.y)),
+            nets_reused = !computing,
             outcome = Empty,
             otel.status_description = Empty,
         );
         std::thread::spawn(move || {
             let _enter = span.enter();
             let result = match roi {
-                None => process(&image, &p, &pr),
+                None => process_with(&image, &p, cached.as_deref(), &pr),
                 Some(roi) => {
                     let x0 = roi.x.saturating_sub(PREVIEW_MARGIN);
                     let y0 = roi.y.saturating_sub(PREVIEW_MARGIN);
                     let x1 = (roi.x + roi.w + PREVIEW_MARGIN).min(image.width);
                     let y1 = (roi.y + roi.h + PREVIEW_MARGIN).min(image.height);
-                    process(&image.crop(y0..y1, x0..x1), &p, &pr).map(|out| {
-                        out.crop(
+                    let crop = image.crop(y0..y1, x0..x1);
+                    process_with(&crop, &p, cached.as_deref(), &pr).map(|(out, nets)| {
+                        let out = out.crop(
                             roi.y - y0..roi.y - y0 + roi.h,
                             roi.x - x0..roi.x - x0 + roi.w,
-                        )
+                        );
+                        (out, nets)
                     })
                 }
             };
@@ -183,17 +201,19 @@ impl Job {
                 }
             };
             span.record("outcome", outcome);
-            let msg = result.map_err(|e| e.to_string()).map(|img| {
+            let msg = result.map_err(|e| e.to_string()).map(|(img, nets)| {
                 let (ci, step) =
                     info_span!("prepare_display").in_scope(|| Picture::color_image(&img, max_side));
-                (img, ci, step)
+                (img, ci, step, nets.map(Arc::new))
             });
             let _ = tx.send(msg);
             ctx.request_repaint();
         });
         Job {
+            key: NetKey::of(&params),
             params,
             roi,
+            computing,
             progress,
             rx,
             started: Instant::now(),
@@ -239,6 +259,11 @@ pub struct AstroSharpApp {
     update_requested: Option<Instant>,
     full: Option<Processed>,
     full_job: Option<Job>,
+    /// Network outputs of the last full-image run, for the image they were computed on.
+    /// Reused when only the aggressiveness changes.
+    full_nets: Option<(Arc<Image>, Arc<NetOutputs>)>,
+    /// Network outputs of the last preview, for its region.
+    preview_nets: Option<(Roi, Arc<NetOutputs>)>,
     last_params: Params,
     status: String,
     /// Flushed on exit: Cmd-Q on macOS never returns from the event loop to `main`.
@@ -274,6 +299,8 @@ impl AstroSharpApp {
             update_requested: None,
             full: None,
             full_job: None,
+            full_nets: None,
+            preview_nets: None,
             status: "Open a TIFF or FITS file (or drop one on the window) to begin.".into(),
             telemetry,
         };
@@ -349,6 +376,8 @@ impl AstroSharpApp {
         self.preview_job = None;
         self.full = None;
         self.full_job = None;
+        self.full_nets = None;
+        self.preview_nets = None;
         self.update_requested = None;
     }
 
@@ -376,12 +405,36 @@ impl AstroSharpApp {
                 .is_some_and(|j| j.params == self.params)
     }
 
+    /// Processes the full image with the current settings, reusing the last run's network
+    /// outputs when only the aggressiveness changed.
     fn start_full(&mut self, ctx: &egui::Context) {
-        if let Some(l) = &self.loaded {
-            // Replacing a running job cancels it (see `Drop for Job`).
-            self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None));
-            self.status = "Processing…".into();
+        let Some(l) = &self.loaded else {
+            return;
+        };
+        let key = NetKey::of(&self.params);
+        // A run still computing the network outputs these settings need isn't cancelled:
+        // once it finishes, only the blend is left. Check again on the next frame.
+        if self
+            .full_job
+            .as_ref()
+            .is_some_and(|j| j.computing && j.key == key && j.params != self.params)
+        {
+            let now = Instant::now();
+            self.update_requested = Some(now.checked_sub(UPDATE_DEBOUNCE).unwrap_or(now));
+            return;
         }
+        // Keep at most one set of outputs: drop any these settings can't use.
+        if self
+            .full_nets
+            .as_ref()
+            .is_some_and(|(image, nets)| !Arc::ptr_eq(image, &l.image) || nets.key() != key)
+        {
+            self.full_nets = None;
+        }
+        let cached = self.full_nets.as_ref().map(|(_, nets)| nets.clone());
+        // Replacing a running job cancels it (see `Drop for Job`).
+        self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None, cached));
+        self.status = "Processing…".into();
     }
 
     /// Saves the current full-image result to `path` in the background. A recognised
@@ -439,8 +492,11 @@ impl AstroSharpApp {
         if let Some(out) = self.preview_job.as_ref().and_then(Job::poll) {
             let job = self.preview_job.take().unwrap();
             match out {
-                Ok((_, ci, step)) => {
+                Ok((_, ci, step, nets)) => {
                     let roi = job.roi.expect("preview jobs have a ROI");
+                    if let Some(nets) = nets {
+                        self.preview_nets = Some((roi, nets));
+                    }
                     let picture = Picture::new(ctx, "preview", ci, step, roi.w, roi.h);
                     self.preview = Some(PreviewResult {
                         params: job.params.clone(),
@@ -455,7 +511,10 @@ impl AstroSharpApp {
         if let Some(out) = self.full_job.as_ref().and_then(Job::poll) {
             let job = self.full_job.take().unwrap();
             match out {
-                Ok((img, ci, step)) => {
+                Ok((img, ci, step, nets)) => {
+                    if let (Some(nets), Some(l)) = (nets, &self.loaded) {
+                        self.full_nets = Some((l.image.clone(), nets));
+                    }
                     let picture = Picture::new(ctx, "processed", ci, step, img.width, img.height);
                     self.status =
                         format!("Processed in {:.2}s.", job.started.elapsed().as_secs_f32());
@@ -487,7 +546,16 @@ impl AstroSharpApp {
                         self.status = "Full-image processing cancelled (settings changed).".into();
                     }
                     let params = self.params.clone();
-                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi)));
+                    let key = NetKey::of(&params);
+                    let cached = self
+                        .preview_nets
+                        .as_ref()
+                        .filter(|(r, nets)| *r == roi && nets.key() == key)
+                        .map(|(_, nets)| nets.clone());
+                    if cached.is_none() {
+                        self.preview_nets = None;
+                    }
+                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi), cached));
                 }
             }
         }
@@ -609,6 +677,8 @@ impl AstroSharpApp {
             ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
             if ui.button("Cancel").clicked() {
                 self.full_job = None;
+                // Don't start a run that was waiting for this one.
+                self.update_requested = None;
                 self.status = "Processing cancelled.".into();
             }
         } else {
