@@ -114,14 +114,16 @@ struct Job {
 }
 
 impl Job {
-    fn spawn(ctx: &egui::Context, image: Arc<Image>, params: Params, roi: Option<Roi>) -> Job {
+    fn spawn(ctx: &egui::Context, loaded: &Loaded, params: Params, roi: Option<Roi>) -> Job {
         let (tx, rx) = mpsc::channel();
         let progress = Arc::new(Progress::new());
         let (ctx, p, pr) = (ctx.clone(), params.clone(), progress.clone());
+        let image = loaded.image.clone();
         let max_side = ctx.input(|i| i.max_texture_side);
         let span = info_span!(
             "process_job",
             kind = if roi.is_some() { "preview" } else { "full" },
+            path = %loaded.path.display(),
             params = %params.describe(),
             roi = roi.map(|r| format!("{}x{} at {},{}", r.w, r.h, r.x, r.y)),
             outcome = Empty,
@@ -335,7 +337,7 @@ impl AstroSharpApp {
     fn start_full(&mut self, ctx: &egui::Context) {
         if let Some(l) = &self.loaded {
             // Replacing a running job cancels it (see `Drop for Job`).
-            self.full_job = Some(Job::spawn(ctx, l.image.clone(), self.params.clone(), None));
+            self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None));
             self.status = "Processing…".into();
         }
     }
@@ -443,7 +445,7 @@ impl AstroSharpApp {
                         self.status = "Full-image processing cancelled (settings changed).".into();
                     }
                     let params = self.params.clone();
-                    self.preview_job = Some(Job::spawn(ctx, l.image.clone(), params, Some(roi)));
+                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi)));
                 }
             }
         }
