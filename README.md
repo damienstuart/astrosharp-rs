@@ -68,14 +68,16 @@ Options:
 
 GUI (Hybrid is the default model):
 - **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
+  - The buttons are colour-coded by what they do: blue processes, amber discards the result, red discards the result and the settings.
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
 - **Open image…** (or drop a file on the window) accepts TIFF and FITS.
-- **Reset** discards the processed result, cancelling any processing in progress, and reloads the image from disk, for example after you've changed it in another program. If the file can no longer be read, the image as first loaded is shown.
-  - The model settings go back to their defaults: Hybrid, PSF 3, Aggressiveness 0.66, Seamless.
-  - The view options and the Save as choice are kept. With Live update on, nothing is reprocessed until you change a setting.
+- **Reset image** and **Reset all** sit under the processing buttons. Both discard the processed result, cancelling any processing in progress, and reload the image from disk, for example after you've changed it in another program. If the file can no longer be read, the image as first loaded is shown.
+  - **Reset image** keeps the model settings. The zoom and preview region are kept too, unless the image's size changed.
+  - **Reset all** also restores the default model settings (Hybrid, PSF 3, Aggressiveness 0.66, Seamless) and a fresh view.
+  - Both keep the view options and the Save as choice. With Live update on, neither reprocesses until you change a setting.
 - **Save as** picks the output format:
   - TIFF (default): 16-bit, or 32-bit float for further processing.
   - FITS: 32-bit float or 16-bit. This is selected automatically, at the source's depth, when you open a FITS file.
@@ -122,7 +124,7 @@ The CLI and GUI can send traces of what they do to an OpenTelemetry endpoint suc
 - **Services:** `astrosharp-cli` and `astrosharp-gui`, tagged with `service.version`.
 - **Spans** cover each operation and processing stage:
   - The CLI's `run` span has `read_image`, `process` and `save_image` as children.
-  - In the GUI, `open_image`, `process_job` (full image or preview, with an `outcome` of ok, cancelled or failed), `save_job` and `reset` each start their own trace.
+  - In the GUI, `open_image`, `process_job` (full image or preview, with an `outcome` of ok, cancelled or failed), `save_job` and `reset` (image or all) each start their own trace.
   - Under `process`: `to_luv` and `from_luv` (colour only), `psf_pass` and `astroclean_pass`, or `hybrid_parity` in R parity mode.
   - Failures mark the top span as an error, with the message.
 - **Detail:** `ASTROSHARP_TRACE` filters what is exported, using [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (default `astrosharp=info`).

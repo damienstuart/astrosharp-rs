@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, ColorImage, Pos2, pos2};
+use eframe::egui::{self, Color32, ColorImage, Pos2, pos2};
 use tracing::field::Empty;
 use tracing::info_span;
 
@@ -22,6 +22,26 @@ use crate::viewer::{self, Layers, Picture, Roi, View};
 const PREVIEW_MARGIN: usize = 8;
 /// Delay after the last change before the image (or preview region) is reprocessed.
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+// Button colours by kind of operation. Each keeps its text at WCAG AA contrast (4.5:1) when
+// idle, hovered and pressed, and stands out from the dark panel by at least 3:1.
+/// Processing.
+const PROCESS_FILL: Color32 = Color32::from_rgb(0x28, 0x62, 0xc8);
+/// Discards the result but keeps the settings.
+const RESET_IMAGE_FILL: Color32 = Color32::from_rgb(0xd0, 0x8c, 0x0c);
+/// Discards the result and the settings.
+const RESET_ALL_FILL: Color32 = Color32::from_rgb(0xc0, 0x39, 0x2b);
+const LIGHT_TEXT: Color32 = Color32::WHITE;
+const DARK_TEXT: Color32 = Color32::from_gray(20);
+
+/// What a reset restores besides reloading the image.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reset {
+    /// Nothing: the settings, view and preview region are kept.
+    Image,
+    /// The default settings, and a fresh view and preview region.
+    All,
+}
 
 struct Loaded {
     path: PathBuf,
@@ -263,27 +283,37 @@ impl AstroSharpApp {
                     self.save_format = FileFormat::Fits;
                     self.fits_depth = depth;
                 }
-                self.show_original(loaded);
+                self.show_original(loaded, false);
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
         }
     }
 
-    /// Discards any results, restores the default settings and reloads the open file from
-    /// disk. If the file can no longer be read, the image as first loaded is shown instead.
-    fn reset(&mut self, ctx: &egui::Context) {
+    /// Discards any results and reloads the open file from disk; [`Reset::All`] also restores
+    /// the default settings. If the file can no longer be read, the image as first loaded is
+    /// shown instead.
+    fn reset(&mut self, ctx: &egui::Context, what: Reset) {
         let Some(path) = self.loaded.as_ref().map(|l| l.path.clone()) else {
             return;
         };
-        let _span = info_span!("reset", path = %path.display()).entered();
-        self.params = default_params();
-        // Not a settings change: Live update shouldn't reprocess straight away.
-        self.last_params = self.params.clone();
+        let kind = match what {
+            Reset::Image => "image",
+            Reset::All => "all",
+        };
+        let _span = info_span!("reset", kind, path = %path.display()).entered();
+        if what == Reset::All {
+            self.params = default_params();
+            // Not a settings change: Live update shouldn't reprocess straight away.
+            self.last_params = self.params.clone();
+        }
+        let keep_view = what == Reset::Image;
         match Loaded::read(ctx, &path) {
-            Ok(loaded) => self.show_original(loaded),
+            Ok(loaded) => self.show_original(loaded, keep_view),
             Err(e) => {
                 self.discard_results();
-                self.view.fit();
+                if !keep_view {
+                    self.view.fit();
+                }
                 self.status = format!(
                     "Could not reload {}: {e}. Showing the image as first loaded.",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -292,13 +322,17 @@ impl AstroSharpApp {
         }
     }
 
-    /// Shows `loaded` as the original, with a fresh view and no results.
-    fn show_original(&mut self, loaded: Loaded) {
-        self.roi = Some(Roi::default_for(loaded.image.width, loaded.image.height));
+    /// Shows `loaded` as the original, with no results. The view and preview region start
+    /// fresh unless `keep_view` is set and the image is the same size as before.
+    fn show_original(&mut self, loaded: Loaded, keep_view: bool) {
+        let size = |l: &Loaded| (l.image.width, l.image.height);
+        if !(keep_view && self.loaded.as_ref().map(size) == Some(size(&loaded))) {
+            self.roi = Some(Roi::default_for(loaded.image.width, loaded.image.height));
+            self.view.fit();
+        }
         self.status = loaded.summary();
         self.loaded = Some(loaded);
         self.discard_results();
-        self.view.fit();
     }
 
     /// Drops the processed results and cancels any processing in progress.
@@ -475,25 +509,13 @@ impl AstroSharpApp {
         ui.add_space(6.0);
         ui.heading("AstroSharp");
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.button("Open image…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("TIFF or FITS", &["tif", "tiff", "fit", "fits", "fts"])
-                    .pick_file()
-            {
-                self.open(ui.ctx(), &path);
-            }
-            if ui
-                .add_enabled(self.loaded.is_some(), egui::Button::new("Reset"))
-                .on_hover_text(
-                    "Discard the processed result, restore the default settings and \
-                     reload the image from disk.",
-                )
-                .clicked()
-            {
-                self.reset(ui.ctx());
-            }
-        });
+        if ui.button("Open image…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("TIFF or FITS", &["tif", "tiff", "fit", "fits", "fts"])
+                .pick_file()
+        {
+            self.open(ui.ctx(), &path);
+        }
         ui.separator();
 
         let p = &mut self.params;
@@ -584,26 +606,17 @@ impl AstroSharpApp {
         } else {
             let loaded = self.loaded.is_some();
             ui.horizontal(|ui| {
+                let process = |ui: &mut egui::Ui, enabled, label| {
+                    tinted_button(ui, enabled, label, PROCESS_FILL, LIGHT_TEXT).clicked()
+                };
                 if self.preview_only {
-                    if ui
-                        .add_enabled(loaded, egui::Button::new("Update preview"))
-                        .clicked()
-                    {
+                    if process(ui, loaded, "Update preview") {
                         self.request_update();
                     }
-                    if ui
-                        .add_enabled(loaded, egui::Button::new("Process full image"))
-                        .clicked()
-                    {
+                    if process(ui, loaded, "Process full image") {
                         self.start_full(ui.ctx());
                     }
-                } else if ui
-                    .add_enabled(
-                        loaded && !self.full_is_current(),
-                        egui::Button::new("Process image"),
-                    )
-                    .clicked()
-                {
+                } else if process(ui, loaded && !self.full_is_current(), "Process image") {
                     self.start_full(ui.ctx());
                 }
             });
@@ -615,8 +628,30 @@ impl AstroSharpApp {
                 "Settings changed since the last update."
             });
         }
-
         ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let loaded = self.loaded.is_some();
+            if tinted_button(ui, loaded, "Reset image", RESET_IMAGE_FILL, DARK_TEXT)
+                .on_hover_text(
+                    "Discard the processed result and reload the image from disk. \
+                     The settings, zoom and preview region are kept.",
+                )
+                .clicked()
+            {
+                self.reset(ui.ctx(), Reset::Image);
+            }
+            if tinted_button(ui, loaded, "Reset all", RESET_ALL_FILL, LIGHT_TEXT)
+                .on_hover_text(
+                    "Discard the processed result, reload the image from disk and \
+                     restore the default settings.",
+                )
+                .clicked()
+            {
+                self.reset(ui.ctx(), Reset::All);
+            }
+        });
+        ui.separator();
+
         ui.horizontal(|ui| {
             ui.label("Save as");
             egui::ComboBox::from_id_salt("save-format")
@@ -709,6 +744,30 @@ impl AstroSharpApp {
             }
         });
     }
+}
+
+/// A button filled with `fill` (lighter when hovered, darker when pressed) with `text`
+/// coloured text. egui's usual hover, press and disabled behaviour is kept.
+fn tinted_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    fill: Color32,
+    text: Color32,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for (state, fill) in [
+            (&mut w.inactive, fill),
+            (&mut w.hovered, fill.lerp_to_gamma(Color32::WHITE, 0.12)),
+            (&mut w.active, fill.lerp_to_gamma(Color32::BLACK, 0.15)),
+        ] {
+            state.weak_bg_fill = fill;
+            state.fg_stroke.color = text;
+        }
+        ui.add_enabled(enabled, egui::Button::new(label))
+    })
+    .inner
 }
 
 /// The R app's defaults, but with the Hybrid model.
