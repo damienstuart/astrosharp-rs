@@ -11,7 +11,7 @@ use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
     BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, Params, Progress, SaveOptions,
-    VERSION, process, read_image, save_image,
+    VERSION, Wcs, process, read_image, save_image,
 };
 use astrosharp_telemetry::{Telemetry, record_error};
 
@@ -48,6 +48,8 @@ struct Loaded {
     image: Arc<Image>,
     /// Header of a FITS source, preserved when saving as FITS.
     fits: Option<FitsHeader>,
+    /// Plate solution from the FITS header, for the cursor's sky coordinates.
+    wcs: Option<Wcs>,
     /// The image looks unstretched (see [`Image::looks_linear`]).
     linear: bool,
     picture: Picture,
@@ -78,6 +80,7 @@ impl Loaded {
                 path: path.to_path_buf(),
                 linear,
                 picture,
+                wcs: fits.as_ref().and_then(|h| Wcs::from_header(h, img.height)),
                 image: Arc::new(img),
                 fits,
             })
@@ -99,7 +102,12 @@ impl Loaded {
             if img.is_color() { "RGB" } else { "grey" }
         );
         if let Some(depth) = self.fits.as_ref().and_then(FitsHeader::source_depth) {
-            s += &format!(" (FITS, {})", depth.name());
+            let solved = if self.wcs.is_some() {
+                ", plate-solved"
+            } else {
+                ""
+            };
+            s += &format!(" (FITS, {}{solved})", depth.name());
         }
         s
     }
@@ -828,6 +836,7 @@ impl eframe::App for AstroSharpApp {
                 processed,
                 roi: self.roi.filter(|_| self.preview_only),
                 split: self.compare.then_some(&mut self.split),
+                sky: loaded.wcs.as_ref(),
             };
             if let Some(roi) = viewer::show(ui, &mut self.view, layers) {
                 self.roi = Some(roi);

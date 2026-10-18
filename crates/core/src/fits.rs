@@ -63,6 +63,11 @@ impl FitsHeader {
         })
     }
 
+    /// Whether rows are stored top to bottom (`ROWORDER = 'TOP-DOWN'`).
+    pub(crate) fn top_down(&self) -> bool {
+        self.top_down
+    }
+
     /// The bit depth closest to the source data, if there was a FITS source.
     pub fn source_depth(&self) -> Option<BitDepth> {
         match self.bitpix {

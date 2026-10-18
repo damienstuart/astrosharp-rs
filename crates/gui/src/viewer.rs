@@ -5,7 +5,8 @@ use eframe::egui::{
     vec2,
 };
 
-use astrosharp_core::Image;
+use astrosharp_core::wcs::{format_dec, format_ra};
+use astrosharp_core::{Image, Wcs};
 
 /// A region of interest in image pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +171,8 @@ pub struct Layers<'a> {
     /// Before/after divider position as a fraction of the view width (original on the
     /// left), or `None` to show only the processed image. Dragging the divider updates it.
     pub split: Option<&'a mut f32>,
+    /// Plate solution, to show the sky coordinates under the cursor.
+    pub sky: Option<&'a Wcs>,
 }
 
 /// Half-width of the divider's grab area, and the radius of its handle.
@@ -262,15 +265,21 @@ pub fn show(ui: &mut egui::Ui, view: &mut View, layers: Layers<'_>) -> Option<Ro
     if let Some(p) = response.hover_pos() {
         let ip = view.to_image(screen, p);
         if ip.x >= 0.0 && ip.y >= 0.0 && (ip.x as usize) < w && (ip.y as usize) < h {
+            let mut text = String::new();
+            if let Some(wcs) = layers.sky {
+                let (ra, dec) = wcs.sky_at(ip.x as f64, ip.y as f64);
+                text = format!("α {}  δ {}\n", format_ra(ra), format_dec(dec));
+            }
+            text += &format!(
+                "x {} y {}  |  {:.0}%",
+                ip.x as usize,
+                ip.y as usize,
+                view.zoom * 100.0
+            );
             painter.text(
                 screen.left_bottom() + Vec2::new(8.0, -8.0),
                 egui::Align2::LEFT_BOTTOM,
-                format!(
-                    "x {} y {}  |  {:.0}%",
-                    ip.x as usize,
-                    ip.y as usize,
-                    view.zoom * 100.0
-                ),
+                text,
                 egui::FontId::monospace(12.0),
                 Color32::from_white_alpha(180),
             );

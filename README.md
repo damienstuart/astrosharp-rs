@@ -22,7 +22,7 @@ Images that look linear trigger a note in the GUI and on the CLI's stderr: the w
 
 | Path | Contents |
 |---|---|
-| `crates/core` | Library: MLP inference, 9x9 feature windows, pipeline, sRGB↔Luv, TIFF I/O, embedded weights |
+| `crates/core` | Library: MLP inference, 9x9 feature windows, pipeline, sRGB↔Luv, TIFF/FITS I/O, plate-solution (WCS) coordinates, embedded weights |
 | `crates/cli` | `astrosharp` command-line tool |
 | `crates/gui` | `astrosharp-gui` desktop app (egui/eframe) |
 | `crates/telemetry` | Tracing setup shared by the CLI and GUI: stderr logging and OpenTelemetry export |
@@ -71,6 +71,9 @@ GUI (Hybrid is the default model):
   - The buttons are colour-coded by what they do: blue processes, amber discards the result, red discards the result and the settings.
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
+- **Cursor readout** (bottom left): the pixel under the cursor, counted from the top-left like Siril, and the zoom.
+  - For a plate-solved FITS file it also shows the sky coordinates, e.g. `α 23h59m47s  δ +66°42'41"`, matching Siril's readout. The status line says "plate-solved" for such files.
+  - See [Plate solutions](#fits-siril) for which solutions are supported.
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
 - **Open image…** (or drop a file on the window) accepts TIFF and FITS.
@@ -100,6 +103,9 @@ GUI (Hybrid is the default model):
   - A `HISTORY AstroSharp <version>: <settings>` line is appended.
 
   Plate solutions (WCS/SIP), observation details and history are therefore kept, and any HDUs after the image are copied unchanged.
+- **Plate solutions:** the GUI reads the WCS keywords that Siril, ASTAP or astrometry.net write.
+  - Supported: the TAN projection, with or without SIP distortion, and a CD, PC + CDELT or CROTA2 + CDELT matrix.
+  - Coordinates are in the solution's own frame, normally J2000. Images without a usable solution, including TIFFs and unsolved stacks with only the pointing RA/DEC, show pixel coordinates only.
 - **Linear data:** see [Recommended workflow](#recommended-workflow).
 
 ## Tracing (OpenTelemetry)

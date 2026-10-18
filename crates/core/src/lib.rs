@@ -9,11 +9,13 @@ pub mod io;
 pub mod model;
 pub mod pipeline;
 pub mod rround;
+pub mod wcs;
 pub mod weights;
 
 pub use fits::FitsHeader;
 pub use image::{Image, Plane};
 pub use io::{BitDepth, FileFormat, SaveOptions, read_image, read_tiff, save_image, write_tiff};
+pub use wcs::Wcs;
 
 /// Version of AstroSharp (all crates share the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
