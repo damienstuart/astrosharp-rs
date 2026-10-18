@@ -14,3 +14,7 @@ astrosharp-telemetry.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 tracing.workspace = true
+
+# Embeds the icon and version details when building on Windows (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true

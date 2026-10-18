@@ -29,8 +29,9 @@ Images that look linear trigger a note in the GUI and on the CLI's stderr: the w
 | `tools/export_weights.R` | Converts the `.RDS` models to `crates/core/weights/*.bin` |
 | `tools/make_golden.R` | Runs the original R functions headless to produce reference outputs |
 | `tools/bundle_macos.sh` | Builds an unsigned `AstroSharp.app` |
+| `tools/package_windows.ps1`, `tools/windows/` | Builds the Windows (ARM64) installer with Inno Setup |
 | `tools/icon` | Standalone helper (uses `resvg`) that renders the icon SVG for `make icon` |
-| `assets/` | App icon: `icon.svg` (source), plus the generated `AppIcon.icns` and `icon-512.png` (window/Dock icon) |
+| `assets/` | App icon: `icon.svg` (source), plus the generated `AppIcon.icns` (macOS), `AppIcon.ico` (Windows) and `icon-512.png` (window/Dock icon) |
 | `testdata/samples` | The sample TIFFs shipped with the R app |
 
 ## Usage
@@ -43,7 +44,7 @@ make release                 # build target/release/astrosharp and astrosharp-gu
 make app                     # target/release/bundle/AstroSharp.app (unsigned)
 make install                 # ...and copy it to /Applications (APP_DIR=... to change)
 make check                   # rustfmt check + clippy + tests
-make icon                    # re-render assets/icon.svg into AppIcon.icns + icon-512.png (commit the results)
+make icon                    # re-render assets/icon.svg into AppIcon.icns, AppIcon.ico + icon-512.png (commit the results)
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
 ```
 
@@ -92,6 +93,26 @@ GUI (Hybrid is the default model):
   Saving runs in the background.
 - **Quit** closes the app.
 
+## Windows
+
+`tools/package_windows.ps1` builds a native ARM64 installer, for example in Windows 11 under Parallels on Apple Silicon. Run it from the repository in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\package_windows.ps1
+```
+
+- **Output:** `target\release\bundle\windows\AstroSharp-<version>-arm64-setup.exe`.
+- **Prerequisites:**
+  - Rust's native ARM64 toolchain: `rustup toolchain install stable-aarch64-pc-windows-msvc`. It needn't be your default; an x64 default runs under emulation and is noticeably slower.
+  - Visual Studio 2022 Build Tools with **MSVC v143 – VS 2022 C++ ARM64/ARM64EC build tools** and a Windows SDK.
+  - Inno Setup 6: `winget install --id JRSoftware.InnoSetup -e`.
+- **The installer:**
+  - Installs for the current user only, with no administrator rights needed, into `%LOCALAPPDATA%\Programs\AstroSharp`.
+  - Installs `AstroSharp.exe` (the GUI) and `astrosharp-cli.exe` (the CLI), adds a Start menu shortcut, and registers an uninstaller in Settings > Apps.
+  - Offers two unticked options: a desktop shortcut, and adding the CLI to your PATH.
+- **The executables** carry the AstroSharp icon and version details, need no Visual C++ Redistributable, and the GUI opens without a console window.
+- **Signing:** the installer isn't code-signed. Windows SmartScreen only warns about it when it was downloaded from the internet.
+
 ## FITS (Siril)
 
 - **Supported files:** uncompressed FITS with the image in the primary HDU, grey or RGB (three planes). Samples can be 8/16/32/64-bit integer or 32/64-bit float, which covers what Siril writes.
@@ -115,7 +136,7 @@ GUI (Hybrid is the default model):
 The CLI and GUI can send traces of what they do to an OpenTelemetry endpoint such as
 [VictoriaTraces](https://docs.victoriametrics.com/victoriatraces/). Nothing is sent unless an endpoint is configured.
 
-- **Configuration:** set the standard variables in the environment, or in `~/.config/astrosharp/otel.env` (under `$XDG_CONFIG_HOME` if that's set).
+- **Configuration:** set the standard variables in the environment, or in `~/.config/astrosharp/otel.env` (under `$XDG_CONFIG_HOME` if that's set; `%APPDATA%\astrosharp\otel.env` on Windows).
   - Apps launched from Finder don't see shell variables, so use the file for AstroSharp.app, and for the bundled CLI when Siril runs it.
   - An endpoint in the environment overrides the file's.
 

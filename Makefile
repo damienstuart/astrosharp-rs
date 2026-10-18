@@ -41,9 +41,9 @@ cli: release ## Build the CLI and show its options
 app: ## Build an unsigned macOS app bundle (GUI + CLI) in target/release/bundle/
 	./tools/bundle_macos.sh
 
-icon: ## Render assets/icon.svg to assets/AppIcon.icns and assets/icon-512.png
+icon: ## Render assets/icon.svg to assets/AppIcon.icns, AppIcon.ico and icon-512.png
 	rm -rf $(ICONSET)
-	$(CARGO) run --release --quiet --manifest-path tools/icon/Cargo.toml --target-dir target -- assets/icon.svg $(ICONSET)
+	$(CARGO) run --release --quiet --manifest-path tools/icon/Cargo.toml --target-dir target -- assets/icon.svg $(ICONSET) assets/AppIcon.ico
 	iconutil -c icns $(ICONSET) -o assets/AppIcon.icns
 	cp $(ICONSET)/icon_256x256@2x.png assets/icon-512.png
 

@@ -2,8 +2,8 @@
 //! are exported over OTLP/HTTP (e.g. to VictoriaTraces) when an endpoint is configured.
 //!
 //! Settings come from the environment, falling back to `astrosharp/otel.env` in
-//! `$XDG_CONFIG_HOME` (default `~/.config`). The file is what configures apps launched
-//! from Finder, which don't see shell variables.
+//! `$XDG_CONFIG_HOME` (default `~/.config`, or `%APPDATA%` on Windows). The file is what
+//! configures apps launched from Finder or the Start menu, which don't see shell variables.
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -205,9 +205,13 @@ fn traces_endpoint(get: impl Fn(&str) -> Option<String>) -> Option<String> {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let dir = env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let dir = env("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| {
+        if cfg!(windows) {
+            env("APPDATA").map(PathBuf::from)
+        } else {
+            env("HOME").map(|home| PathBuf::from(home).join(".config"))
+        }
+    })?;
     Some(dir.join("astrosharp").join("otel.env"))
 }
 
