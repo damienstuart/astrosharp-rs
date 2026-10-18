@@ -163,9 +163,12 @@ pub fn read_tiff(path: impl AsRef<Path>) -> Result<Image, Error> {
 /// header, so it can be preserved when saving.
 #[tracing::instrument(
     skip_all,
-    fields(path = %path.as_ref().display(), format, width, height, channels)
+    fields(path = %path.as_ref().display(), file.size, format, width, height, channels)
 )]
 pub fn read_image(path: impl AsRef<Path>) -> Result<(Image, Option<FitsHeader>), Error> {
+    // Recorded before decoding, so a file that fails to read still shows its size.
+    let size = std::fs::metadata(&path).map(|m| m.len()).ok();
+    tracing::Span::current().record("file.size", size);
     let (img, header) = if FileFormat::from_path(&path) == Some(FileFormat::Fits) {
         let (img, header) = fits::read_fits(path)?;
         (img, Some(header))
@@ -191,6 +194,7 @@ pub fn read_image(path: impl AsRef<Path>) -> Result<(Image, Option<FitsHeader>),
     skip_all,
     fields(
         path = %path.as_ref().display(),
+        file.size,
         format = opts.format.name(),
         depth = opts.depth.name(),
         jpeg_quality = (opts.format == FileFormat::Jpeg).then_some(opts.jpeg_quality),
@@ -202,6 +206,7 @@ pub fn save_image(
     opts: &SaveOptions,
     fits: Option<&FitsHeader>,
 ) -> Result<(), Error> {
+    let path = path.as_ref();
     if !opts.format.depths().contains(&opts.depth) {
         return Err(Error::Unsupported(format!(
             "{} files cannot store {} samples",
@@ -214,7 +219,10 @@ pub fn save_image(
         FileFormat::Fits => fits::write_fits(path, img, opts.depth, fits),
         FileFormat::Png => write_png(path, img, opts.depth),
         FileFormat::Jpeg => write_jpeg(path, img, opts.jpeg_quality),
-    }
+    }?;
+    let size = std::fs::metadata(path).map(|m| m.len()).ok();
+    tracing::Span::current().record("file.size", size);
+    Ok(())
 }
 
 fn clip(v: f64) -> f64 {
