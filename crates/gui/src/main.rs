@@ -16,6 +16,8 @@ fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("AstroSharp")
+            // Lets Linux desktops match windows to the launcher (tools/install_linux.sh).
+            .with_app_id("astrosharp")
             .with_icon(icon)
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 500.0])

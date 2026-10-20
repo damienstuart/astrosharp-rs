@@ -44,6 +44,7 @@ make run [IMAGE=image.tif]   # desktop app
 make release                 # build target/release/astrosharp and astrosharp-gui
 make app                     # target/release/bundle/AstroSharp.app (unsigned)
 make install                 # ...and copy it to /Applications (APP_DIR=... to change)
+make install-linux           # Linux: install the GUI, CLI and a desktop launcher in ~/.local
 make check                   # rustfmt check + clippy + tests
 make icon                    # re-render assets/icon.svg into AppIcon.icns, AppIcon.ico + icon-512.png (commit the results)
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
@@ -97,7 +98,11 @@ GUI (Hybrid is the default model):
 
 ## Linux
 
-- **Building:** `cargo build --release -p astrosharp-gui -p astrosharp-cli` builds the GUI and the CLI.
+- **Installing:** `make install-linux` (or `tools/install_linux.sh`) builds a release and installs AstroSharp for the current user, with no root needed.
+  - The GUI goes in as `~/.local/bin/astrosharp-gui` and the CLI as `~/.local/bin/astrosharp-cli`, the same name as on macOS and Windows.
+  - It adds an **AstroSharp** launcher with the app icon to `~/.local/share`, so the app appears in the desktop's app grid and its window gets the right icon in the dock.
+  - `make uninstall-linux` removes it all again. `BINDIR` and `XDG_DATA_HOME` change where the files go.
+- **Building only:** `cargo build --release -p astrosharp-gui -p astrosharp-cli` builds without installing.
 - **Wayland desktops (e.g. GNOME):** the GUI runs through XWayland, because that's the only way files dropped from the file manager reach it.
   - `ASTROSHARP_WAYLAND=1` runs it as a native Wayland client instead. That's sharper with fractional scaling, but files can't be dropped on it.
   - If the X server isn't reachable, it falls back to Wayland by itself and logs a warning.
