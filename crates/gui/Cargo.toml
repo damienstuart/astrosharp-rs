@@ -3,6 +3,8 @@ name = "astrosharp-gui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "astrosharp-gui"

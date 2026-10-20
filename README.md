@@ -9,8 +9,9 @@ It reads TIFF and FITS (Siril) images and saves TIFF, FITS, PNG or JPEG.
 The trained `neuralnet` weights are exported from the original `.RDS` files and embedded
 in the binaries, so nothing else is needed at runtime: no R, no Electron.
 
-> The upstream repository has no license covering its code or model weights. This port
-> is for personal use; get the author's permission before redistributing it.
+> AstroSharp was originally created by Mark Lowry ([Deep Sky Detail](https://www.youtube.com/@deepskydetail)),
+> who kindly agreed to this open-source port. If you find it useful, consider
+> [buying him a coffee](https://buymeacoffee.com/deepskydetail).
 
 ## Recommended workflow
 
@@ -215,3 +216,7 @@ Apple M5 Max, 6000x4000 (24 MP) image:
 **Memory:** images are held in double precision, which is 8 bytes per channel per pixel. An 89 MP colour image therefore takes 2.1 GB.
 - **CLI:** peaks at about 2.3 times that, roughly 5 GB.
 - **GUI:** also holds the result. While reprocessing, it frees the old result's full-resolution copy and keeps only what's on screen.
+
+## License
+
+MIT; see [LICENSE](LICENSE). The original [AstroSharp](https://github.com/deepskydetail/AstroSharp), including the trained models embedded here, is by Mark Lowry ([Deep Sky Detail](https://www.youtube.com/@deepskydetail)) and is also MIT-licensed.

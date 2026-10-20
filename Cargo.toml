@@ -6,6 +6,8 @@ members = ["crates/core", "crates/cli", "crates/gui", "crates/telemetry"]
 version = "0.4.5"
 edition = "2024"
 publish = false
+license = "MIT"
+repository = "https://github.com/damienstuart/astrosharp-rs"
 
 [workspace.dependencies]
 astrosharp-core = { path = "crates/core" }
