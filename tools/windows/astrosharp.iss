@@ -1,5 +1,6 @@
-; Inno Setup 6 script for the Windows (ARM64) installer. Built by tools\package_windows.ps1,
-; which passes AppVersion and SourceDir (the staged executables) with /D.
+; Inno Setup 6 script for the Windows installer, which carries ARM64 and x64 builds and
+; installs the native one. Built by tools\package_windows.ps1, which passes AppVersion and
+; SourceDir (the staged executables, in arm64\ and x64\) with /D.
 
 #ifndef AppVersion
   #error Define AppVersion (/DAppVersion=x.y.z); build with tools\package_windows.ps1
@@ -18,9 +19,9 @@ VersionInfoVersion={#AppVersion}
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\AstroSharp
 DisableProgramGroupPage=yes
-ArchitecturesAllowed=arm64
-ArchitecturesInstallIn64BitMode=arm64
-OutputBaseFilename=AstroSharp-{#AppVersion}-arm64-setup
+ArchitecturesAllowed=x64compatible or arm64
+ArchitecturesInstallIn64BitMode=x64compatible or arm64
+OutputBaseFilename=AstroSharp-{#AppVersion}-setup
 SetupIconFile=..\..\assets\AppIcon.ico
 UninstallDisplayIcon={app}\AstroSharp.exe
 UninstallDisplayName=AstroSharp
@@ -35,8 +36,11 @@ Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm
 Name: addtopath; Description: "Add astrosharp-cli to my PATH"; GroupDescription: "Command line:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\AstroSharp.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\astrosharp-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The native build for this machine: ARM64 on Windows on ARM, x64 everywhere else.
+Source: "{#SourceDir}\arm64\AstroSharp.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: IsArm64
+Source: "{#SourceDir}\arm64\astrosharp-cli.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: IsArm64
+Source: "{#SourceDir}\x64\AstroSharp.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: not IsArm64
+Source: "{#SourceDir}\x64\astrosharp-cli.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: not IsArm64
 
 [Icons]
 Name: "{autoprograms}\AstroSharp"; Filename: "{app}\AstroSharp.exe"

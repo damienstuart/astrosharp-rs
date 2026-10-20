@@ -13,6 +13,17 @@ in the binaries, so nothing else is needed at runtime: no R, no Electron.
 > who kindly agreed to this open-source port. If you find it useful, consider
 > [buying him a coffee](https://buymeacoffee.com/deepskydetail).
 
+## Downloads
+
+Installers are on the [releases page](https://github.com/damienstuart/astrosharp-rs/releases). They aren't signed with a paid certificate, so expect a warning the first time.
+
+- **macOS (Apple Silicon, macOS 11 or later):** unzip `AstroSharp-<version>-macos-arm64.zip` and move `AstroSharp.app` to Applications.
+  - The first time you open it, macOS says it can't check the app for malware. Go to System Settings > Privacy & Security and click **Open Anyway**; this is only needed once.
+  - The CLI is inside the app, at `AstroSharp.app/Contents/MacOS/astrosharp-cli`.
+- **Windows 10 and 11 (x64 or ARM64):** run `AstroSharp-<version>-setup.exe`; see [Windows](#windows) for what it installs.
+  - SmartScreen may show "Windows protected your PC". Click **More info**, then **Run anyway**.
+- **Linux:** build and install from source with `make install-linux`; see [Linux](#linux).
+
 ## Recommended workflow
 
 AstroSharp is meant as a **final touch-up on a stretched (non-linear) image**. The models were trained on stretched data, so stretch first (in Siril, for example) and run AstroSharp last.
@@ -109,19 +120,20 @@ GUI (Hybrid is the default model):
 
 ## Windows
 
-`tools/package_windows.ps1` builds a native ARM64 installer, for example in Windows 11 under Parallels on Apple Silicon. Run it from the repository in PowerShell:
+`tools/package_windows.ps1` builds one installer for both 64-bit Windows architectures, ARM64 and x64; it installs the native build on each machine. Build it on Windows on ARM (for example Windows 11 under Parallels on Apple Silicon), where the ARM64 toolchain also cross-compiles the x64 build. Run it from the repository in PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\package_windows.ps1
 ```
 
-- **Output:** `target\release\bundle\windows\AstroSharp-<version>-arm64-setup.exe`.
+- **Output:** `target\release\bundle\windows\AstroSharp-<version>-setup.exe`.
 - **Prerequisites:**
-  - Rust's native ARM64 toolchain: `rustup toolchain install stable-aarch64-pc-windows-msvc`. It needn't be your default; an x64 default runs under emulation and is noticeably slower.
-  - Visual Studio 2022 Build Tools with **MSVC v143 – VS 2022 C++ ARM64/ARM64EC build tools** and a Windows SDK.
+  - Rust's native ARM64 toolchain, with the x64 target added: `rustup toolchain install stable-aarch64-pc-windows-msvc`, then `rustup target add x86_64-pc-windows-msvc --toolchain stable-aarch64-pc-windows-msvc`. It needn't be your default; an x64 default runs under emulation and is noticeably slower.
+  - Visual Studio 2022 Build Tools with **MSVC v143 – VS 2022 C++ ARM64/ARM64EC build tools**, **MSVC v143 – VS 2022 C++ x64/x86 build tools** and a Windows SDK.
   - Inno Setup 6: `winget install --id JRSoftware.InnoSetup -e`.
 - **The installer:**
   - Installs for the current user only, with no administrator rights needed, into `%LOCALAPPDATA%\Programs\AstroSharp`.
+  - Picks the build that matches the machine: ARM64 on Windows on ARM, x64 on Intel and AMD PCs.
   - Installs `AstroSharp.exe` (the GUI) and `astrosharp-cli.exe` (the CLI), adds a Start menu shortcut, and registers an uninstaller in Settings > Apps.
   - Offers two unticked options: a desktop shortcut, and adding the CLI to your PATH.
 - **The executables** carry the AstroSharp icon and version details, need no Visual C++ Redistributable, and the GUI opens without a console window.
