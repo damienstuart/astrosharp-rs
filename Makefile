@@ -9,10 +9,10 @@ APP_DIR ?= /Applications
 ICONSET := target/AppIcon.iconset
 
 .DEFAULT_GOAL := help
-.PHONY: help build release test check lint fmt run cli app icon install golden weights clean
+.PHONY: help build release test check lint fmt run cli app icon install install-linux uninstall-linux golden weights clean
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  \033[36m%-9s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Debug build of all crates
 	$(CARGO) build --workspace
@@ -51,6 +51,12 @@ install: app ## Copy AstroSharp.app to /Applications (override with APP_DIR=...)
 	rm -rf "$(APP_DIR)/AstroSharp.app"
 	cp -R "$(APP)" "$(APP_DIR)/"
 	@echo "Installed $(APP_DIR)/AstroSharp.app"
+
+install-linux: ## Linux: install the GUI, CLI and desktop launcher for the current user (~/.local)
+	./tools/install_linux.sh
+
+uninstall-linux: ## Linux: remove what install-linux installed
+	./tools/install_linux.sh --uninstall
 
 golden: ## Regenerate R reference outputs (needs R and the original app at R_APP)
 	Rscript tools/make_golden.R "$(R_APP)" $(GOLDEN)
