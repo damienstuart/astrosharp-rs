@@ -35,6 +35,13 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# Ad-hoc signature (no developer account needed): the bundled CLI first, then the app, which
+# seals the whole bundle. Downloaded copies then get macOS's "Open Anyway" option instead
+# of being reported as damaged; they still aren't notarized.
+codesign --force --sign - --timestamp=none "$app/Contents/MacOS/astrosharp-cli"
+codesign --force --sign - --timestamp=none "$app"
+codesign --verify --deep --strict "$app"
+
 # Nudge Finder/Dock to pick up a changed icon.
 touch "$app"
 echo "Built $app"
