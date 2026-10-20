@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-cli"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "astrosharp-core",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-core"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "jpeg-encoder",
  "libm",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-gui"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "astrosharp-core",
  "astrosharp-telemetry",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "astrosharp-telemetry"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",

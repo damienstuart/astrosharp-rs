@@ -1,9 +1,12 @@
 # astrosharp-rs
 
 A Rust port of [AstroSharp](https://github.com/deepskydetail/AstroSharp)'s image processing.
-The original is an R/Shiny app packaged with Electron. This port covers the **PSF**
-(sharpen), **AstroClean** (denoise) and **Hybrid** (PSF then AstroClean) models.
-The legacy "First Beta" and "Second Beta" models are not ported.
+The original is an R/Shiny app packaged with Electron. This port covers its models:
+- **PSF** (sharpen), **AstroClean** (denoise) and **Hybrid** (PSF then AstroClean).
+- **Dual PSF**, from the app's `DualPSF` branch: one PSF model for the stars and another for the rest of the image (the deep-sky object), mixed through a feathered star mask.
+- **Star Mask**, which outputs that mask, for tuning it or for use elsewhere.
+
+The legacy "First Beta" and "Second Beta" models are not ported, nor is the `DualPSF` branch's experimental linear-data PSF, which that app doesn't offer.
 It reads TIFF and FITS (Siril) images and saves TIFF, FITS, PNG or JPEG.
 
 The trained `neuralnet` weights are exported from the original `.RDS` files and embedded
@@ -34,7 +37,7 @@ Images that look linear trigger a note in the GUI and on the CLI's stderr: the w
 
 | Path | Contents |
 |---|---|
-| `crates/core` | Library: MLP inference, 9x9 feature windows, pipeline, sRGB↔Luv, TIFF/FITS I/O, plate-solution (WCS) coordinates, embedded weights |
+| `crates/core` | Library: MLP inference, 9x9 feature windows, pipeline, star mask (ports of CImg's recursive blur, Hessian and labelling), sRGB↔Luv, TIFF/FITS I/O, plate-solution (WCS) coordinates, embedded weights |
 | `crates/cli` | `astrosharp` command-line tool |
 | `crates/gui` | `astrosharp-gui` desktop app (egui/eframe) |
 | `crates/telemetry` | Tracing setup shared by the CLI and GUI: stderr logging and OpenTelemetry export |
@@ -67,11 +70,17 @@ after `make install` (the Siril script uses it from there).
 CLI example: `astrosharp in.fit out.fit --model hybrid --psf 3 --aggressiveness 0.66`.
 The input can be TIFF or FITS (`.fit`/`.fits`/`.fts`).
 Options:
-- `--model hybrid|psf|astroclean` (default `hybrid`)
-- `--psf <1..8 step 0.25>`
+- `--model hybrid|psf|astroclean|dual-psf|star-mask` (default `hybrid`)
+- `--psf <1..8 step 0.25>`: the PSF model; for `dual-psf`, the one used away from stars
+- `--star-psf <1..8 step 0.25>`: the PSF model for the stars (`dual-psf`)
 - `--aggressiveness <0..1>`
-- `--mode seamless|parity`
-- `--chunk-size <n>` (Hybrid in parity mode only)
+- `--mode seamless|parity` (see [Modes](#modes))
+- `--chunk-size <n>` (Hybrid and Dual PSF in parity mode only)
+- Star mask (`dual-psf`, `star-mask`), with the R app's defaults:
+  - `--sensitivity <0..100>` (98): percentile of the star response above which pixels count as stars.
+  - `--fix-mask <n>` (2): leaves out the regions numbered up to `n`, counted down each column from the left. Region 0 is normally the background.
+  - `--feathering <sigma>` (5): blur of the mask's edges, in pixels.
+  - `--blend <a>` (9) and `--blend2 <b>` (100): shape of the beta curve that turns the feathered mask into weights.
 - Output format follows the file extension: `.tif`/`.tiff`, `.fit`/`.fits`/`.fts`, `.png` or `.jpg`/`.jpeg`
 - `--depth <8|16|32>`:
   - TIFF: 8, 16 (default) or 32 (float).
@@ -85,12 +94,15 @@ GUI (Hybrid is the default model):
   - The buttons are colour-coded by what they do: blue processes, amber discards the result, red discards the result and the settings.
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
   - Changing only Aggressiveness reuses the last run's neural-network results, so the update takes a fraction of a second (about 0.1 s at 20 MP, compared with 1.7 s for a full Hybrid run). The result is identical to processing from scratch.
+  - With Dual PSF and Star Mask, the star mask settings (and for Dual PSF the mode and chunk size) don't need the networks rerun either. The image's star response, the costly part of the mask, is also kept, so a mask change takes about 0.3 s at 19 MP, compared with 2.2 s for a full Dual PSF run.
   - A change made while the first run is still going waits for it to finish, rather than starting over.
-  - The reused results take memory, so they're only kept when the original, the result and the results fit in half the installed RAM. For example, on an 8 GB machine an 89 MP colour image goes without, and every update reprocesses.
+  - The reused results take memory, so they're only kept when the original, the result and the results fit in half the installed RAM. For example, on an 8 GB machine an 89 MP colour image goes without, and every update reprocesses. The star response takes 8 bytes per pixel.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Cursor readout** (bottom left): the pixel under the cursor, counted from the top-left like Siril, and the zoom.
   - For a plate-solved FITS file it also shows the sky coordinates, e.g. `α 23h59m47s  δ +66°42'41"`, matching Siril's readout. The status line says "plate-solved" for such files.
   - See [Plate solutions](#fits-siril) for which solutions are supported.
+- **Dual PSF** has two PSF sliders: **DSO PSF** for the image as a whole and **Star PSF** for the stars. **Star Mask** shows the mask that Dual PSF uses; tune it there, then switch to Dual PSF. Both have a **Star mask** section with the five mask settings (see the CLI options above) and a **Defaults** button.
+- **Histogram** (below the save options): the displayed result's histogram, as in the R app. For Dual PSF and Star Mask, the red line is the Blend / Blend 2 beta curve; it maps the feathered mask to weights.
 - **Compare before/after** (off by default) splits the view into original | processed. Drag the divider's handle (or the line) to move it.
 - **Preview region only** (off by default) processes just a region while you adjust settings. Choose it with Shift-drag or right-drag, and process the whole image with "Process full image". "Update preview" refreshes the region; with Live update on it also refreshes automatically.
 - **Open image…** (or drop a file on the window) accepts TIFF and FITS.
@@ -181,6 +193,8 @@ The CLI and GUI can send traces of what they do to an OpenTelemetry endpoint suc
   - The CLI's `run` span has `read_image`, `process` and `save_image` as children.
   - In the GUI, `open_image`, `process_job` (full image or preview, with an `outcome` of ok, cancelled or failed), `save_job` and `reset` (image or all) each start their own trace.
   - Under `process`: `to_luv` and `from_luv` (colour only), `psf_pass` and `astroclean_pass`, or `hybrid_parity` in R parity mode.
+  - For Dual PSF and Star Mask: `star_response`, `star_mask` (with the threshold and number of regions), `psf_pass` with `which` = `dso` or `stars`, and `dual_parity_masks` in R parity mode.
+  - Previews have a `region` field on `process`.
   - Failures mark the top span as an error, with the message.
 - **Detail:** `ASTROSHARP_TRACE` filters what is exported, using [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (default `astrosharp=info`).
   - `ASTROSHARP_TRACE=astrosharp=debug` adds a span per parity-mode chunk and FITS header details.
@@ -193,13 +207,14 @@ The CLI and GUI can send traces of what they do to an OpenTelemetry endpoint suc
 `cargo test --release` checks the port against reference outputs generated by the R code:
 
 ```sh
-Rscript tools/make_golden.R ../AstroSharp/resources/app testdata/golden   # once, ~25 s
+Rscript tools/make_golden.R ../AstroSharp/resources/app testdata/golden   # once, ~50 s
 cargo test --release
 ```
 
-If `testdata/golden` is missing, the R-comparison tests print `SKIPPED` and pass. The tests cover:
+The reference app is the `DualPSF` branch of AstroSharp; the Dual PSF and Star Mask references need the `imager` (tested with 1.0.8), `magrittr` and `dplyr` packages. If `testdata/golden` is missing, the R-comparison tests print `SKIPPED` and pass. The tests cover:
 
-- **Processed values:** match R within 2.4e-15 (f64 rounding noise) for every model, both grey and colour, several chunk sizes and preview crops.
+- **Processed values:** PSF, AstroClean and Hybrid match R within 2.4e-15 (f64 rounding noise), and Dual PSF and Star Mask within 2e-13. The cases cover grey and colour images, several chunk sizes, preview crops and non-default mask settings.
+- **Star mask:** the ports of CImg's blur and Hessian match a plain-arithmetic transcription in R bit for bit, and imager itself within 6e-13. imager may be compiled with fused multiply-adds, which explains the difference. Thresholds, region labels and the thresholded pixels are identical. `pbeta` (a port of the Cephes incomplete beta) matches R within 3e-13.
 - **Colour output:** matches R exactly.
 - **16-bit TIFFs:** identical to the R app's `writeTIFF` output, sample for sample.
 - **Building blocks:** `readTIFF` scaling, R's `round(x, 5)` and the sRGB↔Luv conversion are bit-identical.
@@ -209,13 +224,24 @@ Behaviours deliberately reproduced:
 - **Feature order.** The 9x9 features use `getmatrix9`'s irregular column order, which the models were trained on.
 - **Colour.** Colour images go through R's sRGB↔Luv (R's own D65 white point), only L is processed, and the output is rounded to 5 decimals.
 
-Modes:
-- **`parity`** reproduces the R app's chunked Hybrid processing, including faint seams at chunk boundaries: stage 2 sees unsharpened pixels at each chunk's rim.
-- **`seamless`** (default) processes the whole image in two passes instead, and keeps colour output at full precision (R rounds it to 5 decimals, which would cost precision in 32-bit linear data). For grey PSF and AstroClean, both modes give identical output.
+### Modes
+- **`parity`** reproduces the R app exactly:
+  - Hybrid is processed in chunks, including faint seams at chunk boundaries: stage 2 sees unsharpened pixels at each chunk's rim.
+  - Dual PSF builds a separate star mask for each chunk, so its result depends on the chunk size.
+  - Star Mask of a colour image is grey RGB.
+- **`seamless`** (default) processes the whole image at once instead:
+  - Hybrid runs in two whole-image passes.
+  - Dual PSF uses one star mask for the whole image, the one Star Mask shows.
+  - Colour output keeps full precision. R rounds it to 5 decimals, which would cost precision in 32-bit linear data.
+  - Star Mask outputs a single grey channel.
+
+  For grey PSF, AstroClean and Star Mask, both modes give identical output.
 
 Intentional differences from the R app:
 - **Colour vs grey** is detected from the file. The R app needed the correct radio button and failed otherwise.
-- **Preview** uses any region you choose and processes it with an 8 px margin, so it matches full-image output. The R app processed a fixed 10% crop as a standalone image.
+- **Preview** uses any region you choose and gives exactly the full-image result there (except Hybrid in parity mode). Models that look at nearby pixels process the region with an 8 px margin; the star mask comes from the whole image. The R app processed a fixed 10% crop as a standalone image.
+- **Histogram** bins are a fixed 1000 over 0–1; R's `hist` picks its breaks from the data.
+- **Star mask in the R app's Windows build** comes from an older imager release, which may treat Feathering below 0.5 differently; the references come from imager 1.0.8.
 - **Out-of-range values** saturate when written to 16-bit; R's `writeTIFF` wraps them.
 - **Alpha channels** are dropped instead of failing.
 - **TIFF tags.** Output files carry a `Predictor=1` tag. libtiff in R logs a harmless "unknown field 317" warning when reading them.
@@ -229,6 +255,8 @@ Apple M5 Max, 6000x4000 (24 MP) image:
 | PSF, grey | 110 s | 0.95 s |
 | Hybrid, grey | not run at 24 MP (34.5 s at 4 MP) | 2.0 s (2.9 s parity; 0.32 s at 4 MP) |
 | PSF / Hybrid, RGB | — | 1.2 s / 2.2 s |
+| Dual PSF, grey / RGB | — | 2.5 s / 2.7 s (same in parity mode) |
+| Star Mask, grey / RGB | — | 0.45 s / 0.5 s |
 
 **Memory:** images are held in double precision, which is 8 bytes per channel per pixel. An 89 MP colour image therefore takes 2.1 GB.
 - **CLI:** peaks at about 2.3 times that, roughly 5 GB.
