@@ -1,63 +1,17 @@
 //! Parity tests against reference outputs produced by the original R code
 //! (`tools/make_golden.R`). Skipped when `testdata/golden` has not been generated.
 
-use std::path::{Path, PathBuf};
+mod common;
 
 use astrosharp_core::features::OFFSETS_9X9;
 use astrosharp_core::pipeline::r_preview_region;
 use astrosharp_core::{
-    Image, Mode, ModelKind, Params, Progress, color, process, read_tiff, rround,
+    MaskParams, Mode, ModelKind, Params, Progress, color, process, read_tiff, rround,
 };
+use common::{golden_dir, max_abs_diff, read_arr, read_image_arr, testdata};
 
 /// Parity tolerance for the processed f64 values.
 const TOL: f64 = 1e-9;
-
-fn testdata() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata")
-}
-
-fn golden_dir() -> Option<PathBuf> {
-    let dir = testdata().join("golden");
-    if dir.join("cases.tsv").exists() {
-        Some(dir)
-    } else {
-        eprintln!(
-            "SKIPPED: no golden data; run `Rscript tools/make_golden.R <AstroSharp/resources/app> testdata/golden`"
-        );
-        None
-    }
-}
-
-/// Reads an "ASAR" array written by make_golden.R: (dims in R order, row-major data).
-fn read_arr(path: &Path) -> (Vec<usize>, Vec<f64>) {
-    let b = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(&b[..4], b"ASAR");
-    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
-    let ndim = u32_at(4);
-    let dims: Vec<usize> = (0..ndim).map(|k| u32_at(8 + 4 * k)).collect();
-    let data: Vec<f64> = b[8 + 4 * ndim..]
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| f64::from_le_bytes(*c))
-        .collect();
-    assert_eq!(data.len(), dims.iter().product::<usize>());
-    (dims, data)
-}
-
-fn read_image_arr(path: &Path) -> Image {
-    let (dims, data) = read_arr(path);
-    let channels = if dims.len() == 3 { dims[2] } else { 1 };
-    Image::new(dims[1], dims[0], channels, data)
-}
-
-fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0, f64::max)
-}
 
 #[test]
 fn feature_order_matches_getmatrix9() {
@@ -165,6 +119,78 @@ fn pipeline_matches_r() {
             aggressiveness: aggr.parse().unwrap(),
             mode: Mode::Parity,
             chunk_size: seg.parse().unwrap(),
+            ..Params::default()
+        };
+        let ours = process(&img, &params, &Progress::new()).unwrap();
+        let expected = read_image_arr(&dir.join(format!("{name}.bin")));
+        assert_eq!(
+            (ours.width, ours.height, ours.channels),
+            (expected.width, expected.height, expected.channels),
+            "{name}: shape"
+        );
+        let d = max_abs_diff(&ours.data, &expected.data);
+        println!("{name:<22} max |diff| = {d:.3e}");
+        if d > TOL {
+            failures.push(format!("{name}: {d:e}"));
+        }
+    }
+    assert!(failures.is_empty(), "parity failures: {failures:?}");
+}
+
+#[test]
+fn star_mask_models_match_r() {
+    let Some(dir) = golden_dir() else { return };
+    let manifest = std::fs::read_to_string(dir.join("mask_cases.tsv")).unwrap();
+    let mut failures = Vec::new();
+    for line in manifest.lines().skip(1) {
+        let f: Vec<&str> = line.split('\t').collect();
+        let [
+            name,
+            image,
+            color,
+            model,
+            psf,
+            psf2,
+            aggr,
+            seg,
+            preview,
+            px,
+            py,
+            sensi,
+            fix,
+            feather,
+            blend,
+            blend2,
+        ] = f[..]
+        else {
+            panic!("bad manifest line: {line}");
+        };
+        let num = |v: &str| v.parse::<f64>().unwrap();
+        let model = match model {
+            "Dual PSF" => ModelKind::DualPsf,
+            "Star Mask" => ModelKind::StarMask,
+            other => panic!("unexpected model {other}"),
+        };
+        let mut img = read_tiff(testdata().join("samples").join(image)).unwrap();
+        assert_eq!(img.is_color(), color == "Color");
+        if preview == "Preview" {
+            let (rows, cols) = r_preview_region(img.height, img.width, num(px), num(py));
+            img = img.crop(rows, cols);
+        }
+        let params = Params {
+            model,
+            psf_fwhm: num(psf),
+            star_psf_fwhm: num(psf2),
+            aggressiveness: num(aggr),
+            mode: Mode::Parity,
+            chunk_size: seg.parse().unwrap(),
+            mask: MaskParams {
+                sensitivity: num(sensi),
+                fix_mask: num(fix),
+                feathering: num(feather),
+                blend: num(blend),
+                blend2: num(blend2),
+            },
         };
         let ours = process(&img, &params, &Progress::new()).unwrap();
         let expected = read_image_arr(&dir.join(format!("{name}.bin")));

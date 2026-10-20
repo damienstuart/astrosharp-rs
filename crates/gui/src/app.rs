@@ -10,17 +10,15 @@ use tracing::info_span;
 use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
-    BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, NetKey, NetOutputs, Params,
-    Progress, SaveOptions, VERSION, Wcs, net_outputs_bytes, process_with, read_image, save_image,
+    BitDepth, Error, FileFormat, FitsHeader, Image, Keep, MaskParams, Mode, ModelKind, NetKey,
+    NetOutputs, Params, Progress, Reuse, SaveOptions, StarResponse, VERSION, Wcs,
+    net_outputs_bytes, process_region, process_with, read_image, response_bytes, save_image,
 };
 use astrosharp_telemetry::{Telemetry, record_error};
 
-use crate::memory;
 use crate::viewer::{self, Layers, Picture, Roi, View};
+use crate::{histogram, memory};
 
-/// Extra context processed around the ROI so the preview matches full-image processing
-/// (two stacked 9x9 windows for Hybrid).
-const PREVIEW_MARGIN: usize = 8;
 /// Delay after the last change before the image (or preview region) is reprocessed.
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -120,17 +118,29 @@ struct Processed {
     /// as large as the original); the picture stays on screen until the new result is in.
     image: Option<Arc<Image>>,
     picture: Picture,
+    histogram: Vec<f32>,
 }
 
 struct PreviewResult {
     params: Params,
     roi: Roi,
     picture: Picture,
+    histogram: Vec<f32>,
 }
 
-/// The processed image, its display version and downsampling step, and the network
-/// outputs the job computed (if it didn't reuse earlier ones).
-type JobOutput = Result<(Image, ColorImage, usize, Option<Arc<NetOutputs>>), String>;
+/// What a processing job produces.
+struct JobResult {
+    image: Image,
+    /// Display version of the image, and its downsampling step.
+    display: ColorImage,
+    step: usize,
+    /// Results the job computed and was asked to keep.
+    nets: Option<Arc<NetOutputs>>,
+    response: Option<Arc<StarResponse>>,
+    histogram: Vec<f32>,
+}
+
+type JobOutput = Result<JobResult, String>;
 
 /// A save running in the background.
 struct SaveJob {
@@ -141,10 +151,14 @@ struct SaveJob {
 struct Job {
     params: Params,
     roi: Option<Roi>,
+    image: Arc<Image>,
     /// The settings its network outputs depend on.
     key: NetKey,
-    /// It is running the networks, rather than reusing earlier outputs.
-    computing: bool,
+    /// It is running the networks for outputs it will return, rather than reusing
+    /// earlier ones.
+    computing_nets: bool,
+    /// It is computing the star response, which it will return.
+    computing_response: bool,
     progress: Arc<Progress>,
     rx: Receiver<JobOutput>,
     started: Instant,
@@ -152,18 +166,20 @@ struct Job {
 
 impl Job {
     /// Processes `loaded` (or the preview region `roi` of it) in the background, reusing
-    /// `cached` network outputs if they fit these settings. With `keep`, newly computed
-    /// outputs are returned for reuse.
+    /// `nets` and `response` if they fit these settings. Newly computed results are
+    /// returned for reuse as `keep` says.
     fn spawn(
         ctx: &egui::Context,
         loaded: &Loaded,
         params: Params,
         roi: Option<Roi>,
-        cached: Option<Arc<NetOutputs>>,
-        keep: bool,
+        nets: Option<Arc<NetOutputs>>,
+        response: Option<Arc<StarResponse>>,
+        keep: Keep,
     ) -> Job {
         let (tx, rx) = mpsc::channel();
-        let computing = cached.is_none();
+        let computing_nets = keep.nets && nets.is_none() && params.model != ModelKind::StarMask;
+        let computing_response = keep.response && response.is_none() && needs_response(&params);
         let progress = Arc::new(Progress::new());
         let (ctx, p, pr) = (ctx.clone(), params.clone(), progress.clone());
         let image = loaded.image.clone();
@@ -174,28 +190,24 @@ impl Job {
             path = %loaded.path.display(),
             params = %params.describe(),
             roi = roi.map(|r| format!("{}x{} at {},{}", r.w, r.h, r.x, r.y)),
-            nets_reused = !computing,
-            nets_kept = keep,
+            nets_reused = nets.is_some(),
+            nets_kept = keep.nets,
+            response_reused = response.is_some(),
+            response_kept = keep.response,
             outcome = Empty,
             otel.status_description = Empty,
         );
+        let job_image = image.clone();
         std::thread::spawn(move || {
             let _enter = span.enter();
+            let reuse = Reuse {
+                nets: nets.as_deref(),
+                response: response.as_deref(),
+            };
             let result = match roi {
-                None => process_with(&image, &p, cached.as_deref(), keep, &pr),
-                Some(roi) => {
-                    let x0 = roi.x.saturating_sub(PREVIEW_MARGIN);
-                    let y0 = roi.y.saturating_sub(PREVIEW_MARGIN);
-                    let x1 = (roi.x + roi.w + PREVIEW_MARGIN).min(image.width);
-                    let y1 = (roi.y + roi.h + PREVIEW_MARGIN).min(image.height);
-                    let crop = image.crop(y0..y1, x0..x1);
-                    process_with(&crop, &p, cached.as_deref(), keep, &pr).map(|(out, nets)| {
-                        let out = out.crop(
-                            roi.y - y0..roi.y - y0 + roi.h,
-                            roi.x - x0..roi.x - x0 + roi.w,
-                        );
-                        (out, nets)
-                    })
+                None => process_with(&image, &p, reuse, keep, &pr),
+                Some(r) => {
+                    process_region(&image, r.y..r.y + r.h, r.x..r.x + r.w, &p, reuse, keep, &pr)
                 }
             };
             let outcome = match &result {
@@ -207,10 +219,18 @@ impl Job {
                 }
             };
             span.record("outcome", outcome);
-            let msg = result.map_err(|e| e.to_string()).map(|(img, nets)| {
-                let (ci, step) =
+            let msg = result.map_err(|e| e.to_string()).map(|(img, fresh)| {
+                let (display, step) =
                     info_span!("prepare_display").in_scope(|| Picture::color_image(&img, max_side));
-                (img, ci, step, nets.map(Arc::new))
+                let histogram = img.histogram(histogram::BINS);
+                JobResult {
+                    image: img,
+                    display,
+                    step,
+                    nets: fresh.nets.map(Arc::new),
+                    response: fresh.response.map(Arc::new),
+                    histogram,
+                }
             });
             let _ = tx.send(msg);
             ctx.request_repaint();
@@ -219,11 +239,25 @@ impl Job {
             key: NetKey::of(&params),
             params,
             roi,
-            computing,
+            image: job_image,
+            computing_nets,
+            computing_response,
             progress,
             rx,
             started: Instant::now(),
         }
+    }
+
+    /// Whether the job is computing results that `params` (for `roi`) can reuse, and
+    /// nothing it can't: then it is left to finish rather than replaced, so that only the
+    /// cheap last steps remain for the new settings.
+    fn worth_finishing(&self, params: &Params, roi: Option<Roi>) -> bool {
+        let nets_ok = !self.computing_nets || (self.key == NetKey::of(params) && self.roi == roi);
+        let response_ok = !self.computing_response || needs_response(params);
+        self.params != *params
+            && (self.computing_nets || self.computing_response)
+            && nets_ok
+            && response_ok
     }
 
     fn poll(&self) -> Option<JobOutput> {
@@ -270,6 +304,9 @@ pub struct AstroSharpApp {
     full_nets: Option<(Arc<Image>, Arc<NetOutputs>)>,
     /// Network outputs of the last preview, for its region.
     preview_nets: Option<(Roi, Arc<NetOutputs>)>,
+    /// The star response of the image it was computed for, kept while the star mask
+    /// settings change.
+    response: Option<(Arc<Image>, Arc<StarResponse>)>,
     last_params: Params,
     status: String,
     /// Flushed on exit: Cmd-Q on macOS never returns from the event loop to `main`.
@@ -307,6 +344,7 @@ impl AstroSharpApp {
             full_job: None,
             full_nets: None,
             preview_nets: None,
+            response: None,
             status: "Open a TIFF or FITS file (or drop one on the window) to begin.".into(),
             telemetry,
         };
@@ -384,7 +422,45 @@ impl AstroSharpApp {
         self.full_job = None;
         self.full_nets = None;
         self.preview_nets = None;
+        self.response = None;
         self.update_requested = None;
+    }
+
+    /// The kept star response, if it belongs to the open image.
+    fn cached_response(&self) -> Option<Arc<StarResponse>> {
+        let l = self.loaded.as_ref()?;
+        self.response
+            .as_ref()
+            .filter(|(image, _)| Arc::ptr_eq(image, &l.image))
+            .map(|(_, r)| r.clone())
+    }
+
+    /// Keeps a response a job computed, if it belongs to the open image.
+    fn store_response(&mut self, job: &Job, response: Option<Arc<StarResponse>>) {
+        if let (Some(r), Some(l)) = (response, &self.loaded)
+            && Arc::ptr_eq(&job.image, &l.image)
+        {
+            self.response = Some((job.image.clone(), r));
+        }
+    }
+
+    /// Asks for the update to be retried on the next frame.
+    fn retry_update(&mut self) {
+        let now = Instant::now();
+        self.update_requested = Some(now.checked_sub(UPDATE_DEBOUNCE).unwrap_or(now));
+    }
+
+    /// The histogram of the result on screen.
+    fn displayed_histogram(&self) -> Option<&[f32]> {
+        let full = self
+            .full
+            .as_ref()
+            .filter(|f| !self.preview_only || f.params == self.params);
+        match (full, &self.preview) {
+            (Some(f), _) => Some(&f.histogram),
+            (None, Some(p)) if self.preview_only => Some(&p.histogram),
+            _ => None,
+        }
     }
 
     /// Reprocesses the image (or the preview region) once changes settle.
@@ -418,27 +494,31 @@ impl AstroSharpApp {
     }
 
     /// Processes the full image with the current settings, reusing the last run's network
-    /// outputs when only the aggressiveness changed.
+    /// outputs (and the star response) when only the aggressiveness or mask settings
+    /// changed.
     fn start_full(&mut self, ctx: &egui::Context) {
-        let Some(l) = &self.loaded else {
+        if self.loaded.is_none() {
             return;
-        };
+        }
         // While reprocessing, only the old result's picture is needed.
         if let Some(full) = self.full.as_mut().filter(|f| f.params != self.params) {
             full.image = None;
         }
-        let key = NetKey::of(&self.params);
-        // A run still computing the network outputs these settings need isn't cancelled:
-        // once it finishes, only the blend is left. Check again on the next frame.
+        // A run still computing results these settings need isn't cancelled: once it
+        // finishes, only the last steps are left. Check again on the next frame.
         if self
             .full_job
             .as_ref()
-            .is_some_and(|j| j.computing && j.key == key && j.params != self.params)
+            .is_some_and(|j| j.worth_finishing(&self.params, None))
         {
-            let now = Instant::now();
-            self.update_requested = Some(now.checked_sub(UPDATE_DEBOUNCE).unwrap_or(now));
+            self.retry_update();
             return;
         }
+        let response = self.cached_response();
+        let Some(l) = &self.loaded else {
+            return;
+        };
+        let key = NetKey::of(&self.params);
         // Keep at most one set of outputs: drop any these settings can't use.
         if self
             .full_nets
@@ -448,9 +528,10 @@ impl AstroSharpApp {
             self.full_nets = None;
         }
         let cached = self.full_nets.as_ref().map(|(_, nets)| nets.clone());
-        let keep = keep_net_outputs(&l.image, &self.params);
+        let keep = keep_policy(&l.image, &self.params, response.is_some());
         // Replacing a running job cancels it (see `Drop for Job`).
-        self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None, cached, keep));
+        let params = self.params.clone();
+        self.full_job = Some(Job::spawn(ctx, l, params, None, cached, response, keep));
         self.status = "Processing…".into();
     }
 
@@ -510,16 +591,18 @@ impl AstroSharpApp {
         if let Some(out) = self.preview_job.as_ref().and_then(Job::poll) {
             let job = self.preview_job.take().unwrap();
             match out {
-                Ok((_, ci, step, nets)) => {
+                Ok(r) => {
                     let roi = job.roi.expect("preview jobs have a ROI");
-                    if let Some(nets) = nets {
+                    if let Some(nets) = r.nets {
                         self.preview_nets = Some((roi, nets));
                     }
-                    let picture = Picture::new(ctx, "preview", ci, step, roi.w, roi.h);
+                    self.store_response(&job, r.response);
+                    let picture = Picture::new(ctx, "preview", r.display, r.step, roi.w, roi.h);
                     self.preview = Some(PreviewResult {
                         params: job.params.clone(),
                         roi,
                         picture,
+                        histogram: r.histogram,
                     });
                 }
                 Err(e) if e != "cancelled" => self.status = format!("Preview failed: {e}"),
@@ -529,17 +612,22 @@ impl AstroSharpApp {
         if let Some(out) = self.full_job.as_ref().and_then(Job::poll) {
             let job = self.full_job.take().unwrap();
             match out {
-                Ok((img, ci, step, nets)) => {
-                    if let (Some(nets), Some(l)) = (nets, &self.loaded) {
+                Ok(r) => {
+                    if let (Some(nets), Some(l)) = (r.nets, &self.loaded)
+                        && Arc::ptr_eq(&job.image, &l.image)
+                    {
                         self.full_nets = Some((l.image.clone(), nets));
                     }
-                    let picture = Picture::new(ctx, "processed", ci, step, img.width, img.height);
+                    self.store_response(&job, r.response);
+                    let (w, h) = (r.image.width, r.image.height);
+                    let picture = Picture::new(ctx, "processed", r.display, r.step, w, h);
                     self.status =
                         format!("Processed in {:.2}s.", job.started.elapsed().as_secs_f32());
                     self.full = Some(Processed {
                         params: job.params.clone(),
-                        image: Some(Arc::new(img)),
+                        image: Some(Arc::new(r.image)),
                         picture,
+                        histogram: r.histogram,
                     });
                 }
                 Err(e) if e == "cancelled" => self.status = "Processing cancelled.".into(),
@@ -559,22 +647,39 @@ impl AstroSharpApp {
                     if !self.full_is_current() {
                         self.start_full(ctx);
                     }
-                } else if let (Some(l), Some(roi)) = (&self.loaded, self.roi) {
+                } else if let Some(roi) = self.roi
+                    && self.loaded.is_some()
+                {
                     if self.full_job.take_if(|j| j.params != self.params).is_some() {
                         self.status = "Full-image processing cancelled (settings changed).".into();
                     }
-                    let params = self.params.clone();
-                    let key = NetKey::of(&params);
-                    let cached = self
-                        .preview_nets
+                    if self
+                        .preview_job
                         .as_ref()
-                        .filter(|(r, nets)| *r == roi && nets.key() == key)
-                        .map(|(_, nets)| nets.clone());
-                    if cached.is_none() {
-                        self.preview_nets = None;
+                        .is_some_and(|j| j.worth_finishing(&self.params, Some(roi)))
+                    {
+                        self.retry_update();
+                    } else {
+                        let response = self.cached_response();
+                        let params = self.params.clone();
+                        let key = NetKey::of(&params);
+                        let cached = self
+                            .preview_nets
+                            .as_ref()
+                            .filter(|(r, nets)| *r == roi && nets.key() == key)
+                            .map(|(_, nets)| nets.clone());
+                        if cached.is_none() {
+                            self.preview_nets = None;
+                        }
+                        let l = self.loaded.as_ref().unwrap();
+                        // Preview regions are small: always keep their network outputs.
+                        let keep = Keep {
+                            nets: true,
+                            ..keep_policy(&l.image, &params, response.is_some())
+                        };
+                        let job = Job::spawn(ctx, l, params, Some(roi), cached, response, keep);
+                        self.preview_job = Some(job);
                     }
-                    // Preview regions are small: always keep their outputs.
-                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi), cached, true));
                 }
             }
         }
@@ -600,7 +705,23 @@ impl AstroSharpApp {
         }
     }
 
+    /// The left panel: the settings, scrolling if they don't fit, above the Quit button.
     fn controls(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(8.0);
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ui.separator();
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.settings(ui));
+            });
+        });
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.heading("AstroSharp");
         ui.add_space(6.0);
@@ -617,41 +738,68 @@ impl AstroSharpApp {
         egui::ComboBox::from_label("Model")
             .selected_text(model_name(p.model))
             .show_ui(ui, |ui| {
-                for m in [ModelKind::Hybrid, ModelKind::Psf, ModelKind::AstroClean] {
+                for m in [
+                    ModelKind::Hybrid,
+                    ModelKind::Psf,
+                    ModelKind::AstroClean,
+                    ModelKind::DualPsf,
+                    ModelKind::StarMask,
+                ] {
                     ui.selectable_value(&mut p.model, m, model_name(m));
                 }
             });
         ui.add_space(4.0);
+        let dual = p.model == ModelKind::DualPsf;
         ui.add_enabled(
-            p.model != ModelKind::AstroClean,
+            p.model.uses_psf(),
             egui::Slider::new(&mut p.psf_fwhm, PSF_MIN..=PSF_MAX)
                 .step_by(PSF_STEP)
-                .text("PSF FWHM (px)"),
+                .text(if dual {
+                    "DSO PSF FWHM (px)"
+                } else {
+                    "PSF FWHM (px)"
+                }),
         )
-        .on_hover_text("Measure the FWHM of a small, unsaturated star and divide by 2.35.");
-        ui.add(
+        .on_hover_text(if dual {
+            "PSF model for everything but the stars (the deep-sky object). Measure the FWHM \
+             of a small, unsaturated star and divide by 2.35."
+        } else {
+            "Measure the FWHM of a small, unsaturated star and divide by 2.35."
+        });
+        if dual {
+            ui.add(
+                egui::Slider::new(&mut p.star_psf_fwhm, PSF_MIN..=PSF_MAX)
+                    .step_by(PSF_STEP)
+                    .text("Star PSF FWHM (px)"),
+            )
+            .on_hover_text("PSF model for the stars, used where the star mask is set.");
+        }
+        ui.add_enabled(
+            p.model.uses_aggressiveness(),
             egui::Slider::new(&mut p.aggressiveness, 0.01..=1.0)
                 .step_by(0.01)
                 .text("Aggressiveness"),
         );
 
-        if p.model == ModelKind::Hybrid {
+        if let Some([seamless, parity]) = mode_help(p.model) {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label("Mode");
                 ui.selectable_value(&mut p.mode, Mode::Seamless, "Seamless")
-                    .on_hover_text("Whole-image passes, no chunk seams.");
+                    .on_hover_text(seamless);
                 ui.selectable_value(&mut p.mode, Mode::Parity, "R parity")
-                    .on_hover_text(
-                        "Reproduces the R app's chunked output exactly (preview is approximate).",
-                    );
+                    .on_hover_text(parity);
             });
-            if p.mode == Mode::Parity {
+            if p.model.chunked_in_parity() && p.mode == Mode::Parity {
                 ui.add(
                     egui::Slider::new(&mut p.chunk_size, MIN_CHUNK_SIZE.max(50)..=750)
                         .text("Chunk size"),
                 );
             }
+        }
+        if p.model.uses_star_mask() {
+            ui.add_space(4.0);
+            star_mask_settings(ui, &mut p.mask);
         }
         ui.add_space(4.0);
         if ui
@@ -806,13 +954,32 @@ impl AstroSharpApp {
             let stem = l.path.file_stem().unwrap_or_default().to_string_lossy();
             let picked = rfd::FileDialog::new()
                 .add_filter(format.name(), format.extensions())
-                .set_file_name(format!("{stem}_sharpened.{}", format.extensions()[0]))
+                .set_file_name(format!(
+                    "{stem}_{}.{}",
+                    if self.params.model == ModelKind::StarMask {
+                        "starmask"
+                    } else {
+                        "sharpened"
+                    },
+                    format.extensions()[0]
+                ))
                 .save_file();
             if let Some(path) = picked {
                 self.start_save(ui.ctx(), path);
             }
         }
 
+        ui.separator();
+        egui::CollapsingHeader::new("Histogram")
+            .default_open(true)
+            .show(ui, |ui| {
+                let curve = self
+                    .params
+                    .model
+                    .uses_star_mask()
+                    .then_some((self.params.mask.blend, self.params.mask.blend2));
+                histogram::show(ui, self.displayed_histogram(), curve);
+            });
         ui.separator();
         if self.preview_job.is_some() {
             ui.horizontal(|ui| {
@@ -833,14 +1000,80 @@ impl AstroSharpApp {
             );
         }
         ui.label(&self.status);
+    }
+}
 
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(8.0);
-            if ui.button("Quit").clicked() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+/// Tooltips for the Seamless and R parity modes, for the models where they matter.
+fn mode_help(model: ModelKind) -> Option<[&'static str; 2]> {
+    match model {
+        ModelKind::Hybrid => Some([
+            "Whole-image passes, no chunk seams.",
+            "Reproduces the R app's chunked output exactly (preview is approximate).",
+        ]),
+        ModelKind::DualPsf => Some([
+            "One star mask for the whole image (the one Star Mask shows).",
+            "Reproduces the R app exactly, with a star mask for each processing chunk.",
+        ]),
+        ModelKind::StarMask => Some([
+            "The mask as a grey image.",
+            "Like the R app: for colour images, the mask as the lightness of grey RGB.",
+        ]),
+        ModelKind::Psf | ModelKind::AstroClean => None,
+    }
+}
+
+/// The star mask section: its five settings (with the R app's names) and their defaults.
+fn star_mask_settings(ui: &mut egui::Ui, m: &mut MaskParams) {
+    egui::CollapsingHeader::new("Star mask")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut m.sensitivity, 1.0..=100.0)
+                    .step_by(0.1)
+                    .text("Sensitivity"),
+            )
+            .on_hover_text(
+                "Percentile of the star response above which pixels count as stars: \
+                 higher finds fewer stars.",
+            );
+            let mut fix = m.fix_mask.max(0.0) as u32;
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::DragValue::new(&mut fix).range(0..=1000))
+                    .changed()
+                {
+                    m.fix_mask = f64::from(fix);
+                }
+                ui.label("Fix mask");
+            })
+            .response
+            .on_hover_text(
+                "Leaves out the first regions found scanning down each column from the \
+                 left, up to this number. Region 0 is normally the background; raise it to \
+                 drop artefacts at the left edge.",
+            );
+            ui.add(
+                egui::Slider::new(&mut m.feathering, 0.001..=30.0)
+                    .logarithmic(true)
+                    .text("Feathering"),
+            )
+            .on_hover_text("Blur (sigma, px) of the mask edges; below 0.1 there is none.");
+            ui.horizontal(|ui| {
+                for (v, label) in [(&mut m.blend, "Blend"), (&mut m.blend2, "Blend 2")] {
+                    ui.add(egui::DragValue::new(v).range(1e-4..=1e4).speed(0.05));
+                    ui.label(label);
+                }
+            })
+            .response
+            .on_hover_text(
+                "Shape of the beta curve (red in the histogram) that turns the feathered \
+                 mask into weights: it rises around Blend / (Blend + Blend 2), more steeply \
+                 the larger they are.",
+            );
+            if ui.button("Defaults").clicked() {
+                *m = MaskParams::default();
             }
         });
-    }
 }
 
 /// A button filled with `fill` (lighter when hovered, darker when pressed) with `text`
@@ -867,13 +1100,33 @@ fn tinted_button(
     .inner
 }
 
-/// Whether there's room to keep a full-image run's network outputs, to reuse when only the
-/// aggressiveness changes: the original, the result and the outputs should fit in half the
-/// installed memory, so very large images on small machines go without.
-fn keep_net_outputs(image: &Image, params: &Params) -> bool {
-    let needed = 2 * image.data.len() * size_of::<f64>()
-        + net_outputs_bytes(image.width, image.height, params);
-    memory::installed().is_none_or(|ram| needed as u64 <= ram / 2)
+/// Whether the model needs the star response of the whole image.
+fn needs_response(params: &Params) -> bool {
+    match params.model {
+        ModelKind::StarMask => true,
+        ModelKind::DualPsf => params.mode == Mode::Seamless,
+        _ => false,
+    }
+}
+
+/// Which results of a full-image run there's room to keep, to reuse when only the
+/// aggressiveness or the star mask settings change: the original, the result and what is
+/// kept should fit in half the installed memory, so very large images on small machines
+/// go without. `holding_response` says a star response is already kept.
+fn keep_policy(image: &Image, params: &Params, holding_response: bool) -> Keep {
+    let fits = |bytes: usize| memory::installed().is_none_or(|ram| bytes as u64 <= ram / 2);
+    let images = 2 * image.data.len() * size_of::<f64>();
+    let response = response_bytes(image.width, image.height);
+    let keep_response = needs_response(params) && fits(images + response);
+    let held = if holding_response || keep_response {
+        response
+    } else {
+        0
+    };
+    Keep {
+        nets: fits(images + held + net_outputs_bytes(image.width, image.height, params)),
+        response: keep_response,
+    }
 }
 
 /// The R app's defaults, but with the Hybrid model.
@@ -889,6 +1142,8 @@ fn model_name(m: ModelKind) -> &'static str {
         ModelKind::Psf => "PSF (sharpen)",
         ModelKind::AstroClean => "AstroClean (denoise)",
         ModelKind::Hybrid => "Hybrid (sharpen + clean)",
+        ModelKind::DualPsf => "Dual PSF (stars + DSO)",
+        ModelKind::StarMask => "Star Mask (show mask)",
     }
 }
 

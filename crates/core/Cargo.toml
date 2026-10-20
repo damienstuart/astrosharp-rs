@@ -10,6 +10,7 @@ repository.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 matrixmultiply.workspace = true
+libm.workspace = true
 tiff.workspace = true
 png.workspace = true
 jpeg-encoder.workspace = true

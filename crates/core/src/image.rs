@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use rayon::prelude::*;
+
 /// 99th-percentile brightness below which an image is treated as linear (unstretched).
 /// Linear stacks tested sit at or below 0.04, stretched images at 0.58 or above.
 const LINEAR_P99: f64 = 0.15;
@@ -50,6 +52,36 @@ impl Image {
         let k = (lum.len() - 1) * 99 / 100;
         let (_, p99, _) = lum.select_nth_unstable_by(k, f64::total_cmp);
         *p99 < LINEAR_P99
+    }
+
+    /// Histogram of the samples (all channels pooled) in `bins` equal bins over [0, 1],
+    /// normalised so the fullest bin is 1, as the R app plots it. Values outside [0, 1]
+    /// count in the end bins.
+    pub fn histogram(&self, bins: usize) -> Vec<f32> {
+        assert!(bins > 0);
+        let counts = self
+            .data
+            .par_chunks(1 << 16)
+            .fold(
+                || vec![0u64; bins],
+                |mut acc, chunk| {
+                    for &v in chunk {
+                        // R's hist() closes bins on the right: (a, b], with 0 in the first.
+                        let b = (v * bins as f64).ceil() as isize - 1;
+                        acc[b.clamp(0, bins as isize - 1) as usize] += 1;
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0u64; bins],
+                |mut a, b| {
+                    a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            );
+        let max = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
+        counts.into_iter().map(|c| c as f32 / max).collect()
     }
 
     pub fn crop(&self, rows: Range<usize>, cols: Range<usize>) -> Image {
@@ -143,6 +175,14 @@ mod tests {
             })
             .collect();
         Image::new(w, h, 1, data)
+    }
+
+    #[test]
+    fn histogram_bins_are_closed_on_the_right() {
+        let img = Image::new(5, 1, 1, vec![0.0, 0.1, 0.10001, 1.0, 2.0]);
+        let h = img.histogram(10);
+        // 0 and 0.1 fall in the first bin, 0.10001 in the second, 1 and 2 in the last.
+        assert_eq!(h, [1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]

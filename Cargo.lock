@@ -319,6 +319,7 @@ name = "astrosharp-core"
 version = "0.4.7"
 dependencies = [
  "jpeg-encoder",
+ "libm",
  "matrixmultiply",
  "png",
  "rayon",
