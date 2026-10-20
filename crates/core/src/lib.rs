@@ -20,7 +20,8 @@ pub use wcs::Wcs;
 /// Version of AstroSharp (all crates share the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use pipeline::{
-    Mode, ModelKind, NetKey, NetOutputs, Params, Progress, process, process_plane, process_with,
+    Mode, ModelKind, NetKey, NetOutputs, Params, Progress, net_outputs_bytes, process,
+    process_plane, process_with,
 };
 
 #[derive(Debug, thiserror::Error)]

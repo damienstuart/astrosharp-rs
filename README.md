@@ -73,6 +73,7 @@ GUI (Hybrid is the default model):
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
   - Changing only Aggressiveness reuses the last run's neural-network results, so the update takes a fraction of a second (about 0.1 s at 20 MP, compared with 1.7 s for a full Hybrid run). The result is identical to processing from scratch.
   - A change made while the first run is still going waits for it to finish, rather than starting over.
+  - The reused results take memory, so they're only kept when the original, the result and the results fit in half the installed RAM. For example, on an 8 GB machine an 89 MP colour image goes without, and every update reprocesses.
 - **Navigation:** drag to pan, scroll or pinch to zoom, double-click to fit. Hold Space to show the original.
 - **Cursor readout** (bottom left): the pixel under the cursor, counted from the top-left like Siril, and the zoom.
   - For a plate-solved FITS file it also shows the sky coordinates, e.g. `α 23h59m47s  δ +66°42'41"`, matching Siril's readout. The status line says "plate-solved" for such files.
@@ -92,6 +93,13 @@ GUI (Hybrid is the default model):
 
   Saving runs in the background.
 - **Quit** closes the app.
+
+## Linux
+
+- **Building:** `cargo build --release -p astrosharp-gui -p astrosharp-cli` builds the GUI and the CLI.
+- **Wayland desktops (e.g. GNOME):** the GUI runs through XWayland, because that's the only way files dropped from the file manager reach it.
+  - `ASTROSHARP_WAYLAND=1` runs it as a native Wayland client instead. That's sharper with fractional scaling, but files can't be dropped on it.
+  - If the X server isn't reachable, it falls back to Wayland by itself and logs a warning.
 
 ## Windows
 
@@ -203,3 +211,7 @@ Apple M5 Max, 6000x4000 (24 MP) image:
 | PSF, grey | 110 s | 0.95 s |
 | Hybrid, grey | not run at 24 MP (34.5 s at 4 MP) | 2.0 s (2.9 s parity; 0.32 s at 4 MP) |
 | PSF / Hybrid, RGB | — | 1.2 s / 2.2 s |
+
+**Memory:** images are held in double precision, which is 8 bytes per channel per pixel. An 89 MP colour image therefore takes 2.1 GB.
+- **CLI:** peaks at about 2.3 times that, roughly 5 GB.
+- **GUI:** also holds the result. While reprocessing, it frees the old result's full-resolution copy and keeps only what's on screen.

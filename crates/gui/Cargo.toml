@@ -15,6 +15,10 @@ eframe.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+winit.workspace = true
+x11-dl.workspace = true
+
 # Embeds the icon and version details when building on Windows (see build.rs).
 [target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true

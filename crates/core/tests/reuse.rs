@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use astrosharp_core::{
-    Image, Mode, ModelKind, NetOutputs, Params, Progress, process, process_with, read_tiff,
+    Image, Mode, ModelKind, NetOutputs, Params, Progress, net_outputs_bytes, process, process_with,
+    read_tiff,
 };
 
 fn sample(name: &str) -> Image {
@@ -48,7 +49,7 @@ fn configs() -> Vec<Params> {
 }
 
 fn nets(img: &Image, params: &Params) -> NetOutputs {
-    let (_, nets) = process_with(img, params, None, &Progress::new()).unwrap();
+    let (_, nets) = process_with(img, params, None, true, &Progress::new()).unwrap();
     nets.expect("newly computed outputs are returned")
 }
 
@@ -61,7 +62,7 @@ fn reused_outputs_give_the_same_result_as_processing() {
                 aggressiveness: 0.4,
                 ..base.clone()
             };
-            let (out, nets) = process_with(&img, &first, None, &Progress::new()).unwrap();
+            let (out, nets) = process_with(&img, &first, None, true, &Progress::new()).unwrap();
             let nets = nets.expect("newly computed outputs are returned");
             let expected = process(&img, &first, &Progress::new()).unwrap();
             assert_eq!(bits(&out), bits(&expected), "{image} {first:?}");
@@ -71,7 +72,7 @@ fn reused_outputs_give_the_same_result_as_processing() {
                     ..base.clone()
                 };
                 let progress = Progress::new();
-                let (reused, fresh) = process_with(&img, &p, Some(&nets), &progress).unwrap();
+                let (reused, fresh) = process_with(&img, &p, Some(&nets), true, &progress).unwrap();
                 assert!(fresh.is_none(), "matching outputs are reused");
                 assert_eq!(progress.fraction(), 1.0);
                 let expected = process(&img, &p, &Progress::new()).unwrap();
@@ -97,7 +98,8 @@ fn single_model_outputs_are_reused_across_modes() {
             aggressiveness: 0.8,
             ..seamless
         };
-        let (out, fresh) = process_with(&img, &parity, Some(&nets), &Progress::new()).unwrap();
+        let (out, fresh) =
+            process_with(&img, &parity, Some(&nets), true, &Progress::new()).unwrap();
         assert!(fresh.is_none());
         let expected = process(&img, &parity, &Progress::new()).unwrap();
         assert_eq!(bits(&out), bits(&expected), "{model:?}");
@@ -205,10 +207,29 @@ fn mismatched_outputs_are_recomputed() {
         psf_fwhm: 4.0,
         ..psf3
     };
-    let (out, fresh) = process_with(&img, &psf4, Some(&stale), &Progress::new()).unwrap();
+    let (out, fresh) = process_with(&img, &psf4, Some(&stale), true, &Progress::new()).unwrap();
     assert!(fresh.is_some_and(|n| n.matches(&img, &psf4)));
     assert_eq!(
         bits(&out),
         bits(&process(&img, &psf4, &Progress::new()).unwrap())
     );
+}
+
+#[test]
+fn output_size_is_predicted_and_keep_is_honoured() {
+    for image in ["T1.tif", "CT1.tif"] {
+        let img = sample(image);
+        for p in configs() {
+            let nets = nets(&img, &p);
+            assert_eq!(
+                nets.bytes(),
+                net_outputs_bytes(img.width, img.height, &p),
+                "{image} {p:?}"
+            );
+            let (out, kept) = process_with(&img, &p, None, false, &Progress::new()).unwrap();
+            assert!(kept.is_none(), "keep = false returns no outputs");
+            let expected = process(&img, &p, &Progress::new()).unwrap();
+            assert_eq!(bits(&out), bits(&expected));
+        }
+    }
 }

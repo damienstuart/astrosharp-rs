@@ -176,6 +176,16 @@ impl NetOutputs {
     pub fn key(&self) -> NetKey {
         self.key
     }
+
+    /// Memory these outputs take (see [`net_outputs_bytes`]).
+    pub fn bytes(&self) -> usize {
+        let values = match &self.nets {
+            Nets::Single(nn) => nn.len(),
+            Nets::Seamless { sharp, cleaned } => sharp.data.len() + cleaned.len(),
+            Nets::Parity { sharp, cleaned } => sharp.data.len() + cleaned.data.len(),
+        };
+        values * size_of::<f64>()
+    }
 }
 
 /// Network outputs for one channel, in the layout each model's blend reads.
@@ -198,18 +208,35 @@ pub fn process(img: &Image, params: &Params, progress: &Progress) -> Result<Imag
 
 /// Like [`process`], but reuses `cached` network outputs when they [match](NetOutputs::matches)
 /// the image and settings, so only the blend runs (for example when just the
-/// aggressiveness changed). Returns the network outputs it computed, if it had to.
+/// aggressiveness changed). With `keep`, returns the network outputs it computed, if it
+/// had to; they take [`net_outputs_bytes`] of memory.
 pub fn process_with(
     img: &Image,
     params: &Params,
     cached: Option<&NetOutputs>,
+    keep: bool,
     progress: &Progress,
 ) -> Result<(Image, Option<NetOutputs>), Error> {
     let span = process_span(img, params);
     let _enter = span.enter();
     let cached = cached.filter(|n| n.matches(img, params));
     span.record("reused", cached.is_some());
-    run(img, params, cached, true, progress)
+    run(img, params, cached, keep, progress)
+}
+
+/// Memory taken by the network outputs [`process_with`] returns for a `width` x `height`
+/// image (for colour images only the lightness is processed).
+pub fn net_outputs_bytes(width: usize, height: usize, params: &Params) -> usize {
+    let (kw, kh) = (
+        width.saturating_sub(RADIUS + 5),
+        height.saturating_sub(RADIUS + 5),
+    );
+    let values = match (params.model, params.mode) {
+        (ModelKind::Psf | ModelKind::AstroClean, _) => kw * kh,
+        (ModelKind::Hybrid, Mode::Seamless) => width * height + kw * kh,
+        (ModelKind::Hybrid, Mode::Parity) => 2 * (width + 2 * RADIUS) * (height + 2 * RADIUS),
+    };
+    values * size_of::<f64>()
 }
 
 /// The `process` span: image size and settings.
@@ -257,28 +284,33 @@ fn run(
         let fresh = nets.filter(|_| keep).map(wrap);
         return Ok((Image::new(w, h, 1, out.data), fresh));
     }
-    let luv: Vec<[f64; 3]> = info_span!("to_luv").in_scope(|| {
-        img.data
-            .par_chunks_exact(3)
-            .map(|p| color::srgb_to_luv([p[0], p[1], p[2]]))
-            .collect()
+    // Only the lightness is processed. Its u and v are recomputed from the source pixels at
+    // the end rather than kept: a full Luv copy would be as large as the image.
+    let luv = |p: &[f64]| color::srgb_to_luv([p[0], p[1], p[2]]);
+    let lightness = info_span!("to_luv").in_scope(|| {
+        let l = img.data.par_chunks_exact(3).map(|p| luv(p)[0] / 100.0);
+        Plane::new(w, h, l.collect())
     });
-    let lightness = Plane::new(w, h, luv.iter().map(|p| p[0] / 100.0).collect());
     let (out, nets) = plane_stage(&lightness, params, cached, progress)?;
+    drop(lightness);
     // Without `keep`, the network outputs are freed here, before the conversion back.
     let fresh = nets.filter(|_| keep).map(wrap);
     let data = info_span!("from_luv").in_scope(|| {
-        luv.par_iter()
-            .zip(&out.data)
-            .flat_map_iter(|(p, &l)| {
-                let luv = [l * 100.0, p[1], p[2]];
+        // Written in place: collecting a non-indexed iterator would hold the output twice.
+        let mut data = vec![0.0; w * h * 3];
+        data.par_chunks_exact_mut(3)
+            .zip(img.data.par_chunks_exact(3))
+            .zip(out.data.par_iter())
+            .for_each(|((rgb, p), &l)| {
+                let [_, u, v] = luv(p);
+                let luv = [l * 100.0, u, v];
                 // R rounds to 5 decimals; only parity mode reproduces that.
-                match params.mode {
+                rgb.copy_from_slice(&match params.mode {
                     Mode::Parity => color::luv_to_srgb(luv),
                     Mode::Seamless => color::luv_to_srgb_unrounded(luv),
-                }
-            })
-            .collect()
+                });
+            });
+        data
     });
     Ok((Image::new(w, h, 3, data), fresh))
 }
@@ -431,6 +463,7 @@ fn hybrid_seamless_nets(
             progress,
         )
     })?;
+    drop(padded);
     let sharp = Plane::new(w, h, sharp);
     let cleaned = info_span!("astroclean_pass")
         .in_scope(|| eval_windows(clean, &sharp, rows, cols, progress))?;

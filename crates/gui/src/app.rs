@@ -11,10 +11,11 @@ use astrosharp_core::pipeline::{MIN_CHUNK_SIZE, MIN_SIZE};
 use astrosharp_core::weights::{PSF_MAX, PSF_MIN, PSF_STEP};
 use astrosharp_core::{
     BitDepth, Error, FileFormat, FitsHeader, Image, Mode, ModelKind, NetKey, NetOutputs, Params,
-    Progress, SaveOptions, VERSION, Wcs, process_with, read_image, save_image,
+    Progress, SaveOptions, VERSION, Wcs, net_outputs_bytes, process_with, read_image, save_image,
 };
 use astrosharp_telemetry::{Telemetry, record_error};
 
+use crate::memory;
 use crate::viewer::{self, Layers, Picture, Roi, View};
 
 /// Extra context processed around the ROI so the preview matches full-image processing
@@ -115,7 +116,9 @@ impl Loaded {
 
 struct Processed {
     params: Params,
-    image: Arc<Image>,
+    /// Freed once reprocessing with other settings starts (it can't be saved then, and is
+    /// as large as the original); the picture stays on screen until the new result is in.
+    image: Option<Arc<Image>>,
     picture: Picture,
 }
 
@@ -149,13 +152,15 @@ struct Job {
 
 impl Job {
     /// Processes `loaded` (or the preview region `roi` of it) in the background, reusing
-    /// `cached` network outputs if they fit these settings.
+    /// `cached` network outputs if they fit these settings. With `keep`, newly computed
+    /// outputs are returned for reuse.
     fn spawn(
         ctx: &egui::Context,
         loaded: &Loaded,
         params: Params,
         roi: Option<Roi>,
         cached: Option<Arc<NetOutputs>>,
+        keep: bool,
     ) -> Job {
         let (tx, rx) = mpsc::channel();
         let computing = cached.is_none();
@@ -170,20 +175,21 @@ impl Job {
             params = %params.describe(),
             roi = roi.map(|r| format!("{}x{} at {},{}", r.w, r.h, r.x, r.y)),
             nets_reused = !computing,
+            nets_kept = keep,
             outcome = Empty,
             otel.status_description = Empty,
         );
         std::thread::spawn(move || {
             let _enter = span.enter();
             let result = match roi {
-                None => process_with(&image, &p, cached.as_deref(), &pr),
+                None => process_with(&image, &p, cached.as_deref(), keep, &pr),
                 Some(roi) => {
                     let x0 = roi.x.saturating_sub(PREVIEW_MARGIN);
                     let y0 = roi.y.saturating_sub(PREVIEW_MARGIN);
                     let x1 = (roi.x + roi.w + PREVIEW_MARGIN).min(image.width);
                     let y1 = (roi.y + roi.h + PREVIEW_MARGIN).min(image.height);
                     let crop = image.crop(y0..y1, x0..x1);
-                    process_with(&crop, &p, cached.as_deref(), &pr).map(|(out, nets)| {
+                    process_with(&crop, &p, cached.as_deref(), keep, &pr).map(|(out, nets)| {
                         let out = out.crop(
                             roi.y - y0..roi.y - y0 + roi.h,
                             roi.x - x0..roi.x - x0 + roi.w,
@@ -397,8 +403,14 @@ impl AstroSharpApp {
         }
     }
 
+    /// The full-image result for the current settings, if it can still be saved.
+    fn current_full(&self) -> Option<(&Processed, &Arc<Image>)> {
+        let full = self.full.as_ref().filter(|f| f.params == self.params)?;
+        Some((full, full.image.as_ref()?))
+    }
+
     fn full_is_current(&self) -> bool {
-        self.full.as_ref().is_some_and(|f| f.params == self.params)
+        self.current_full().is_some()
             || self
                 .full_job
                 .as_ref()
@@ -411,6 +423,10 @@ impl AstroSharpApp {
         let Some(l) = &self.loaded else {
             return;
         };
+        // While reprocessing, only the old result's picture is needed.
+        if let Some(full) = self.full.as_mut().filter(|f| f.params != self.params) {
+            full.image = None;
+        }
         let key = NetKey::of(&self.params);
         // A run still computing the network outputs these settings need isn't cancelled:
         // once it finishes, only the blend is left. Check again on the next frame.
@@ -432,17 +448,19 @@ impl AstroSharpApp {
             self.full_nets = None;
         }
         let cached = self.full_nets.as_ref().map(|(_, nets)| nets.clone());
+        let keep = keep_net_outputs(&l.image, &self.params);
         // Replacing a running job cancels it (see `Drop for Job`).
-        self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None, cached));
+        self.full_job = Some(Job::spawn(ctx, l, self.params.clone(), None, cached, keep));
         self.status = "Processing…".into();
     }
 
     /// Saves the current full-image result to `path` in the background. A recognised
     /// extension in `path` picks the format; otherwise the selected format's is added.
     fn start_save(&mut self, ctx: &egui::Context, mut path: PathBuf) {
-        let Some(full) = self.full.as_ref().filter(|f| f.params == self.params) else {
+        let Some((full, image)) = self.current_full() else {
             return;
         };
+        let image = image.clone();
         let chosen = self.save_format;
         let format = FileFormat::from_path(&path).unwrap_or_else(|| {
             path.as_mut_os_string()
@@ -470,7 +488,7 @@ impl AstroSharpApp {
             h
         });
         let (tx, rx) = mpsc::channel();
-        let (image, target, ctx) = (full.image.clone(), path.clone(), ctx.clone());
+        let (target, ctx) = (path.clone(), ctx.clone());
         let span = info_span!(
             "save_job",
             path = %path.display(),
@@ -520,7 +538,7 @@ impl AstroSharpApp {
                         format!("Processed in {:.2}s.", job.started.elapsed().as_secs_f32());
                     self.full = Some(Processed {
                         params: job.params.clone(),
-                        image: Arc::new(img),
+                        image: Some(Arc::new(img)),
                         picture,
                     });
                 }
@@ -555,7 +573,8 @@ impl AstroSharpApp {
                     if cached.is_none() {
                         self.preview_nets = None;
                     }
-                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi), cached));
+                    // Preview regions are small: always keep their outputs.
+                    self.preview_job = Some(Job::spawn(ctx, l, params, Some(roi), cached, true));
                 }
             }
         }
@@ -771,7 +790,7 @@ impl AstroSharpApp {
             }
         }
 
-        let current = self.full.as_ref().is_some_and(|f| f.params == self.params);
+        let current = self.current_full().is_some();
         if ui
             .add_enabled(
                 current && self.save_job.is_none(),
@@ -846,6 +865,15 @@ fn tinted_button(
         ui.add_enabled(enabled, egui::Button::new(label))
     })
     .inner
+}
+
+/// Whether there's room to keep a full-image run's network outputs, to reuse when only the
+/// aggressiveness changes: the original, the result and the outputs should fit in half the
+/// installed memory, so very large images on small machines go without.
+fn keep_net_outputs(image: &Image, params: &Params) -> bool {
+    let needed = 2 * image.data.len() * size_of::<f64>()
+        + net_outputs_bytes(image.width, image.height, params);
+    memory::installed().is_none_or(|ram| needed as u64 <= ram / 2)
 }
 
 /// The R app's defaults, but with the Hybrid model.
