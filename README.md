@@ -70,7 +70,7 @@ after `make install` (the Siril script uses it from there).
 CLI example: `astrosharp in.fit out.fit --model hybrid --psf 3 --aggressiveness 0.66`.
 The input can be TIFF or FITS (`.fit`/`.fits`/`.fts`).
 Options:
-- `--model hybrid|psf|astroclean|dual-psf|star-mask` (default `hybrid`)
+- `--model dual-psf|hybrid|psf|astroclean|star-mask` (default `dual-psf`)
 - `--psf <1..8 step 0.25>`: the PSF model; for `dual-psf`, the one used away from stars
 - `--star-psf <1..8 step 0.25>`: the PSF model for the stars (`dual-psf`)
 - `--aggressiveness <0..1>`

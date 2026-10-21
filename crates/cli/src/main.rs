@@ -22,7 +22,7 @@ struct Args {
     /// Output file; the format follows the extension (.tif/.tiff, .fit/.fits/.fts, .png,
     /// .jpg/.jpeg). FITS output keeps a FITS input's header and adds a HISTORY line.
     output: PathBuf,
-    #[arg(long, value_enum, default_value_t = Model::Hybrid)]
+    #[arg(long, value_enum, default_value_t = Model::DualPsf)]
     model: Model,
     /// PSF FWHM in pixels (1–8, steps of 0.25). Used by the psf, hybrid and dual-psf models
     /// (for dual-psf, away from stars).
