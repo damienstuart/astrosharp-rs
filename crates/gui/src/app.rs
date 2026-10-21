@@ -1129,10 +1129,10 @@ fn keep_policy(image: &Image, params: &Params, holding_response: bool) -> Keep {
     }
 }
 
-/// The R app's defaults, but with the Hybrid model.
+/// The R app's defaults, but with the Dual PSF model.
 fn default_params() -> Params {
     Params {
-        model: ModelKind::Hybrid,
+        model: ModelKind::DualPsf,
         ..Params::default()
     }
 }

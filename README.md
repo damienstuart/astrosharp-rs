@@ -89,7 +89,7 @@ Options:
   - JPEG: 8 only.
 - `--quality <1..100>` (JPEG only, default 90)
 
-GUI (Hybrid is the default model):
+GUI (Dual PSF is the default model):
 - **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
   - The buttons are colour-coded by what they do: blue processes, amber discards the result, red discards the result and the settings.
 - **Live update** (off by default) reprocesses about 0.25 s after the last settings change. With it off, nothing is processed until you press a button.
@@ -108,7 +108,7 @@ GUI (Hybrid is the default model):
 - **Open image…** (or drop a file on the window) accepts TIFF and FITS.
 - **Reset image** and **Reset all** sit under the processing buttons. Both discard the processed result, cancelling any processing in progress, and reload the image from disk, for example after you've changed it in another program. If the file can no longer be read, the image as first loaded is shown.
   - **Reset image** keeps the model settings. The zoom and preview region are kept too, unless the image's size changed.
-  - **Reset all** also restores the default model settings (Hybrid, PSF 3, Aggressiveness 0.66, Seamless) and a fresh view.
+  - **Reset all** also restores the default model settings (Dual PSF, DSO and star PSF 3, Aggressiveness 0.66, Seamless, and the star mask defaults) and a fresh view.
   - Both keep the view options and the Save as choice. With Live update on, neither reprocesses until you change a setting.
 - **Save as** picks the output format:
   - TIFF (default): 16-bit, or 32-bit float for further processing.
