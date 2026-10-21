@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use astrosharp_core::{
-    Image, Mode, ModelKind, NetOutputs, Params, Progress, net_outputs_bytes, process, process_with,
-    read_tiff,
+    Error, Image, Keep, Mode, ModelKind, NetOutputs, Params, Progress, Reuse, net_outputs_bytes,
+    process, process_with, read_tiff,
 };
 
 fn sample(name: &str) -> Image {
@@ -13,6 +13,25 @@ fn sample(name: &str) -> Image {
         .join(name);
     // A crop keeps the many runs below quick.
     read_tiff(path).unwrap().crop(100..260, 120..300)
+}
+
+/// `process_with`, reusing and keeping only network outputs.
+fn with_nets(
+    img: &Image,
+    params: &Params,
+    cached: Option<&NetOutputs>,
+    keep: bool,
+    progress: &Progress,
+) -> Result<(Image, Option<NetOutputs>), Error> {
+    let reuse = Reuse {
+        nets: cached,
+        response: None,
+    };
+    let keep = Keep {
+        nets: keep,
+        response: false,
+    };
+    process_with(img, params, reuse, keep, progress).map(|(out, fresh)| (out, fresh.nets))
 }
 
 fn bits(img: &Image) -> Vec<u64> {
@@ -43,13 +62,34 @@ fn configs() -> Vec<Params> {
             model: ModelKind::Hybrid,
             mode: Mode::Parity,
             chunk_size: 60,
+            ..p.clone()
+        },
+        Params {
+            model: ModelKind::DualPsf,
+            star_psf_fwhm: 2.0,
+            ..p.clone()
+        },
+        Params {
+            model: ModelKind::DualPsf,
+            star_psf_fwhm: 2.0,
+            mode: Mode::Parity,
+            chunk_size: 60,
+            ..p.clone()
+        },
+        Params {
+            model: ModelKind::DualPsf,
+            ..p.clone()
+        },
+        Params {
+            model: ModelKind::StarMask,
+            mode: Mode::Parity,
             ..p
         },
     ]
 }
 
 fn nets(img: &Image, params: &Params) -> NetOutputs {
-    let (_, nets) = process_with(img, params, None, true, &Progress::new()).unwrap();
+    let (_, nets) = with_nets(img, params, None, true, &Progress::new()).unwrap();
     nets.expect("newly computed outputs are returned")
 }
 
@@ -62,7 +102,7 @@ fn reused_outputs_give_the_same_result_as_processing() {
                 aggressiveness: 0.4,
                 ..base.clone()
             };
-            let (out, nets) = process_with(&img, &first, None, true, &Progress::new()).unwrap();
+            let (out, nets) = with_nets(&img, &first, None, true, &Progress::new()).unwrap();
             let nets = nets.expect("newly computed outputs are returned");
             let expected = process(&img, &first, &Progress::new()).unwrap();
             assert_eq!(bits(&out), bits(&expected), "{image} {first:?}");
@@ -72,7 +112,7 @@ fn reused_outputs_give_the_same_result_as_processing() {
                     ..base.clone()
                 };
                 let progress = Progress::new();
-                let (reused, fresh) = process_with(&img, &p, Some(&nets), true, &progress).unwrap();
+                let (reused, fresh) = with_nets(&img, &p, Some(&nets), true, &progress).unwrap();
                 assert!(fresh.is_none(), "matching outputs are reused");
                 assert_eq!(progress.fraction(), 1.0);
                 let expected = process(&img, &p, &Progress::new()).unwrap();
@@ -98,8 +138,7 @@ fn single_model_outputs_are_reused_across_modes() {
             aggressiveness: 0.8,
             ..seamless
         };
-        let (out, fresh) =
-            process_with(&img, &parity, Some(&nets), true, &Progress::new()).unwrap();
+        let (out, fresh) = with_nets(&img, &parity, Some(&nets), true, &Progress::new()).unwrap();
         assert!(fresh.is_none());
         let expected = process(&img, &parity, &Progress::new()).unwrap();
         assert_eq!(bits(&out), bits(&expected), "{model:?}");
@@ -207,7 +246,7 @@ fn mismatched_outputs_are_recomputed() {
         psf_fwhm: 4.0,
         ..psf3
     };
-    let (out, fresh) = process_with(&img, &psf4, Some(&stale), true, &Progress::new()).unwrap();
+    let (out, fresh) = with_nets(&img, &psf4, Some(&stale), true, &Progress::new()).unwrap();
     assert!(fresh.is_some_and(|n| n.matches(&img, &psf4)));
     assert_eq!(
         bits(&out),
@@ -226,7 +265,7 @@ fn output_size_is_predicted_and_keep_is_honoured() {
                 net_outputs_bytes(img.width, img.height, &p),
                 "{image} {p:?}"
             );
-            let (out, kept) = process_with(&img, &p, None, false, &Progress::new()).unwrap();
+            let (out, kept) = with_nets(&img, &p, None, false, &Progress::new()).unwrap();
             assert!(kept.is_none(), "keep = false returns no outputs");
             let expected = process(&img, &p, &Progress::new()).unwrap();
             assert_eq!(bits(&out), bits(&expected));

@@ -1,27 +1,32 @@
 //! Rust port of the AstroSharp image sharpening and denoising pipeline
-//! (PSF, AstroClean and Hybrid models) from the original R/Shiny app.
+//! (PSF, AstroClean, Hybrid, Dual PSF and Star Mask models) from the original R/Shiny app.
 
+pub mod cimg;
 pub mod color;
+mod dual;
 pub mod features;
 pub mod fits;
 pub mod image;
 pub mod io;
 pub mod model;
+pub mod pbeta;
 pub mod pipeline;
 pub mod rround;
+pub mod starmask;
 pub mod wcs;
 pub mod weights;
 
 pub use fits::FitsHeader;
 pub use image::{Image, Plane};
 pub use io::{BitDepth, FileFormat, SaveOptions, read_image, read_tiff, save_image, write_tiff};
+pub use starmask::{MaskParams, StarResponse, response_bytes};
 pub use wcs::Wcs;
 
 /// Version of AstroSharp (all crates share the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use pipeline::{
-    Mode, ModelKind, NetKey, NetOutputs, Params, Progress, net_outputs_bytes, process,
-    process_plane, process_with,
+    Fresh, Keep, Mode, ModelKind, NetKey, NetOutputs, Params, Progress, Reuse, net_outputs_bytes,
+    process, process_plane, process_region, process_with,
 };
 
 #[derive(Debug, thiserror::Error)]
