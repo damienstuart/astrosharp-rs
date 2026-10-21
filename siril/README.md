@@ -1,13 +1,18 @@
 # AstroSharp for Siril
 
 A Siril script that runs [AstroSharp](../astrosharp-rs) on the image currently open in
-Siril. It can sharpen (PSF), denoise (AstroClean) or do both (Hybrid).
+Siril. It offers AstroSharp's models:
+- **Dual PSF** (the default) sharpens the stars and the rest of the image with different
+  PSF models, mixed through a feathered star mask.
+- **Hybrid**, **PSF** and **AstroClean** sharpen, denoise, or do both.
+- **Star Mask** produces the mask itself, for checking it or for use in other tools.
 
 You can preview the result and compare it with the original, using zoom, pan and a
 draggable before/after divider like the AstroSharp app. When you're happy, **Send to
 Siril** updates the image in place with an undo point, so **Edit → Undo** (Ctrl/Cmd+Z)
 restores it. The settings are recorded in the image's FITS HISTORY, for example
-`AstroSharp: Hybrid PSF 3 aggr 0.66`.
+`AstroSharp: Dual PSF 3/2 aggr 0.66` (DSO PSF 3, star PSF 2). Star mask settings are added
+when they aren't the defaults.
 
 AstroSharp is meant as a **final touch-up on a stretched (non-linear) image**. If the image
 looks linear, the script logs a warning in Siril's console, but it still processes the image.
@@ -15,10 +20,11 @@ looks linear, the script logs a warning in Siril's console, but it still process
 ## Requirements
 
 - Siril 1.4 or later. The script uses Siril's bundled Python with numpy and PyQt6.
-- AstroSharp 0.3.0 or later. Run `make install` in `astrosharp-rs`, which puts
-  `AstroSharp.app`, with its CLI at `Contents/MacOS/astrosharp-cli`, in `/Applications`.
-  The script finds it there; otherwise choose the CLI, or `AstroSharp.app` itself, with
-  **Browse…**.
+- AstroSharp 0.5.0 or later for Dual PSF and Star Mask; the other models work from
+  0.3.0. Run `make install` in `astrosharp-rs`, which puts `AstroSharp.app`, with its CLI
+  at `Contents/MacOS/astrosharp-cli`, in `/Applications`. The script finds it there;
+  otherwise choose the CLI, or `AstroSharp.app` itself, with **Browse…**.
+  - The window shows the CLI's version, with a note if it's too old for the chosen model.
 
 ## Install
 
@@ -35,7 +41,15 @@ The script appears in the **Scripts** menu.
 
 - **Scripts → AstroSharp** opens a window with the settings on the left and the image on
   the right:
-  - **Settings:** choose the model, PSF FWHM, Aggressiveness and, for Hybrid, the mode.
+  - **Settings:** choose the model, PSF FWHM, Aggressiveness and, for Hybrid, Dual PSF and
+    Star Mask, the mode.
+    - **Dual PSF** has two PSF sliders: **DSO PSF** for the image as a whole and **Star
+      PSF** for the stars.
+    - Dual PSF and Star Mask have a **Star mask** box with the R app's five settings:
+      Sensitivity, Fix mask, Feathering, Blend and Blend 2. **Defaults** restores them.
+      Tune the mask with Star Mask, then switch to Dual PSF.
+    - **Star Mask on a colour image** gives a grey mask in all three channels, so the
+      image stays RGB.
   - **Preview** processes a copy of the image; Siril's image is not changed. **Live
     preview** (off by default) refreshes it whenever a setting changes.
   - **Viewing:** scroll to zoom, drag to pan, double-click to fit, and hold Space to see
@@ -54,16 +68,21 @@ The script appears in the **Scripts** menu.
   option you leave out uses the saved settings:
 
   ```
+  pyscript AstroSharp.py -model dual-psf -psf 3 -starpsf 2 -aggressiveness 0.66
   pyscript AstroSharp.py -model hybrid -psf 3 -aggressiveness 0.66
   pyscript AstroSharp.py -model psf -psf 2.5 -aggressiveness 0.8
+  pyscript AstroSharp.py -model star-mask -sensitivity 95 -feathering 3
   ```
 
   The options are:
-  - `-model hybrid|psf|astroclean`
-  - `-psf <1..8, steps of 0.25>`
+  - `-model dual-psf|hybrid|psf|astroclean|star-mask`
+  - `-psf <1..8, steps of 0.25>`: for Dual PSF, the PSF used away from the stars
+  - `-starpsf <1..8, steps of 0.25>` (Dual PSF)
   - `-aggressiveness <0..1>`
   - `-mode seamless|parity`
-  - `-chunksize <n>` (Hybrid in parity mode only)
+  - `-chunksize <n>` (Hybrid and Dual PSF in parity mode only)
+  - Star mask (Dual PSF and Star Mask): `-sensitivity <0..100>` (default 98),
+    `-fixmask <n>` (2), `-feathering <sigma>` (5), `-blend <a>` (9), `-blend2 <b>` (100)
   - `-executable <path to astrosharp-cli or AstroSharp.app>`
 
 ## How it works
@@ -84,10 +103,13 @@ make test ASTROSHARP_FITS=image.fit    # also the CLI integration test on a real
 
 The tests cover:
 - The script's FITS writing/reading and its 16-bit/float conversions.
-- The processing flow against a fake Siril, using the real CLI.
+- The command line for each model, the HISTORY text and the per-model CLI version check.
+- The processing flow against a fake Siril, using the real CLI, for Hybrid, Dual PSF and
+  Star Mask (which keeps colour images RGB).
 - The preview window, off-screen: preview without touching Siril, sending exactly the
   previewed result, processing first when settings changed, refusing to send when Siril's
-  image changed, Reset, live preview, field widths, and dragging the divider.
+  image changed, Reset, live preview, field widths, dragging the divider, the rows each
+  model shows, and saving and restoring the star mask settings.
 - With `ASTROSHARP_FITS`: a check that processing through the script gives results
   bit-identical to running the CLI directly on the file.
 
@@ -108,5 +130,7 @@ They don't need Siril. Set `ASTROSHARP_CLI` to use a CLI other than the one in
 - [ ] Repeat with a 16-bit image (the bit depth is unchanged afterwards).
 - [ ] Open a linear stack. The window shows the "looks linear" note, and processing logs a
       salmon note in the console.
+- [ ] Choose Star Mask and Preview: the mask appears. Change Sensitivity or Feathering and
+      Preview again; then choose Dual PSF with a smaller Star PSF and Send to Siril.
 - [ ] In a `.ssf` script: `pyscript AstroSharp.py -model psf -psf 2.5` processes the loaded
       image without opening the window.

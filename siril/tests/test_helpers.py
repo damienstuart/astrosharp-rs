@@ -8,6 +8,7 @@ It is skipped when either is missing.
 
 import contextlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -97,29 +98,90 @@ class ConversionTests(unittest.TestCase):
         np.testing.assert_array_equal(A.from_float(data, np.float32), [0.0, 0.25, 1.0])
 
 
+MASK_OPTIONS = ["--sensitivity", "98", "--fix-mask", "2", "--feathering", "5", "--blend", "9",
+                "--blend2", "100"]
+
+
 class CommandTests(unittest.TestCase):
     def test_build_command(self):
-        cmd = A.build_command("cli", "in.fit", "out.fit", A.Params())
+        cmd = A.build_command("cli", "in.fit", "out.fit", A.Params(model="hybrid"))
         self.assertEqual(cmd, ["cli", "in.fit", "out.fit", "--model", "hybrid", "--psf", "3",
                                "--aggressiveness", "0.66", "--mode", "seamless",
                                "--depth", "32"])
-        parity = A.Params(mode="parity", chunk_size=150, psf=2.25)
+        parity = A.Params(model="hybrid", mode="parity", chunk_size=150, psf=2.25)
         cmd = A.build_command("cli", "i", "o", parity)
         self.assertIn("2.25", cmd)
         self.assertEqual(cmd[-2:], ["--chunk-size", "150"])
 
+    def test_build_command_for_the_star_mask_models(self):
+        # Dual PSF is the default model.
+        cmd = A.build_command("cli", "i", "o", A.Params(star_psf=2.0))
+        self.assertEqual(cmd[3:], ["--model", "dual-psf", "--psf", "3", "--aggressiveness",
+                                   "0.66", "--mode", "seamless", "--depth", "32",
+                                   "--star-psf", "2"] + MASK_OPTIONS)
+        cmd = A.build_command("cli", "i", "o", A.Params(mode="parity", chunk_size=200))
+        self.assertEqual(cmd[-2:], ["--chunk-size", "200"])
+        mask = A.Params(model="star-mask", mode="parity", sensitivity=95.5, fix_mask=0,
+                        feathering=2.5, blend=2.0, blend2=20.0)
+        cmd = A.build_command("cli", "i", "o", mask)
+        self.assertNotIn("--star-psf", cmd)
+        self.assertNotIn("--chunk-size", cmd)
+        self.assertEqual(cmd[-10:], ["--sensitivity", "95.5", "--fix-mask", "0",
+                                     "--feathering", "2.5", "--blend", "2", "--blend2", "20"])
+
     def test_history_text(self):
-        self.assertEqual(A.history_text(A.Params()), "AstroSharp: Hybrid PSF 3 aggr 0.66")
-        self.assertEqual(A.settings_text(A.Params()), "Hybrid PSF 3 aggr 0.66")
+        hybrid = A.Params(model="hybrid")
+        self.assertEqual(A.history_text(hybrid), "AstroSharp: Hybrid PSF 3 aggr 0.66")
+        self.assertEqual(A.settings_text(hybrid), "Hybrid PSF 3 aggr 0.66")
         self.assertEqual(A.history_text(A.Params(model="astroclean", aggressiveness=0.5)),
                          "AstroSharp: AstroClean aggr 0.50")
-        longest = A.Params(mode="parity", chunk_size=750, psf=7.75)
+        longest = A.Params(model="hybrid", mode="parity", chunk_size=750, psf=7.75)
         self.assertLessEqual(len(A.history_text(longest).encode()), 70)
+
+    def test_history_text_for_the_star_mask_models(self):
+        self.assertEqual(A.settings_text(A.Params(star_psf=2.0)), "Dual PSF 3/2 aggr 0.66")
+        self.assertEqual(A.settings_text(A.Params(model="star-mask")), "Star Mask 98/2/5/9/100")
+        self.assertEqual(A.settings_text(A.Params(model="star-mask", mode="parity")),
+                         "Star Mask 98/2/5/9/100 parity")
+        # Dual PSF lists the mask settings only when they aren't the defaults.
+        custom = A.Params(star_psf=2.0, mode="parity", sensitivity=95.0, fix_mask=0,
+                          feathering=2.5, blend=2.0, blend2=20.0)
+        self.assertEqual(A.history_text(custom),
+                         "AstroSharp: Dual PSF 3/2 aggr 0.66 parity chunk 325 mask 95/0/2.5/2/20")
+        self.assertLessEqual(len(A.history_text(custom).encode()), 70)
 
     def test_params_from_config(self):
         p = A.Params.from_dict({"model": "psf", "psf": "2.5", "aggressiveness": None,
                                 "mode": "bogus", "chunk_size": 200})
         self.assertEqual(p, A.Params(model="psf", psf=2.5, chunk_size=200))
+        p = A.Params.from_dict({"model": "star-mask", "star_psf": 2.25, "sensitivity": "90",
+                                "fix_mask": 5, "feathering": "x", "blend2": 50})
+        self.assertEqual(p, A.Params(model="star-mask", star_psf=2.25, sensitivity=90.0,
+                                     fix_mask=5, blend2=50.0))
+        # Settings saved by version 0.2.0 keep their model; the new ones get defaults.
+        old = A.Params.from_dict({"model": "hybrid", "psf": 3.0, "aggressiveness": 0.66,
+                                  "mode": "seamless", "chunk_size": 325})
+        self.assertEqual(old, A.Params(model="hybrid"))
+
+    def test_star_mask_models_need_a_newer_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "astrosharp-cli"
+            exe.write_text("#!/bin/sh\necho astrosharp-cli 0.4.6\n")
+            exe.chmod(0o755)
+            self.assertEqual(A.check_executable(str(exe), "hybrid"), str(exe))
+            for model in ("dual-psf", "star-mask"):
+                with self.assertRaisesRegex(RuntimeError, "needs AstroSharp 0.5.0"):
+                    A.check_executable(str(exe), model)
+            exe.write_text("#!/bin/sh\necho astrosharp-cli 0.5.0\n")
+            self.assertEqual(A.check_executable(str(exe), "dual-psf"), str(exe))
+
+    def test_grey_star_mask_of_colour_image_fills_every_channel(self):
+        mask = np.arange(6, dtype=np.float32).reshape(2, 3)
+        out = A.fit_shape(mask, (3, 2, 3))
+        self.assertEqual(out.shape, (3, 2, 3))
+        for c in range(3):
+            np.testing.assert_array_equal(out[c], mask)
+        np.testing.assert_array_equal(A.fit_shape(mask, (2, 3)), mask)
 
     def test_find_executable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -166,7 +228,10 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertFalse(np.array_equal(via_script, siril_pixels), "image was not processed")
 
             identity = self.run_cli(inp, out, A.Params(model="psf", aggressiveness=0.0))
-            np.testing.assert_array_equal(A.from_float(identity, np.float32), siril_pixels)
+            # Colour goes through Luv and back, so channels that are exactly 0 come back as
+            # about 1e-16, which 32-bit floats can hold; everything else is unchanged.
+            np.testing.assert_allclose(A.from_float(identity, np.float32), siril_pixels,
+                                       rtol=0, atol=1e-7)
 
 
 if __name__ == "__main__":
@@ -257,13 +322,29 @@ class JobTests(unittest.TestCase):
 
     def test_float_rgb_is_processed_with_undo_point(self):
         pixels = np.random.default_rng(2).uniform(0.2, 0.8, (3, 40, 50)).astype(np.float32)
-        siril, job = self.run_job(pixels, A.Params())
+        siril, job = self.run_job(pixels, A.Params(model="hybrid"))
         self.assertIsNone(siril.result, "running must not touch Siril's image")
         job.apply(siril)
         self.assertEqual((siril.result.shape, siril.result.dtype), (pixels.shape, np.float32))
         self.assertFalse(np.array_equal(siril.result, pixels))
         self.assertEqual(siril.undo, ["AstroSharp: Hybrid PSF 3 aggr 0.66"])
         self.assertTrue(any(c == "green" for _, c in siril.logs))
+
+    def test_dual_psf(self):
+        pixels = np.random.default_rng(7).uniform(0.2, 0.8, (3, 40, 50)).astype(np.float32)
+        siril, job = self.run_job(pixels, A.Params(star_psf=2.0))
+        job.apply(siril)
+        self.assertEqual(siril.result.shape, pixels.shape)
+        self.assertFalse(np.array_equal(siril.result, pixels))
+        self.assertEqual(siril.undo, ["AstroSharp: Dual PSF 3/2 aggr 0.66"])
+
+    def test_star_mask_of_colour_image_stays_rgb(self):
+        pixels = np.random.default_rng(8).uniform(0.2, 0.8, (3, 40, 50)).astype(np.float32)
+        for mode in ("seamless", "parity"):
+            siril, job = self.run_job(pixels, A.Params(model="star-mask", mode=mode))
+            self.assertEqual(job.result.shape, pixels.shape, mode)
+            np.testing.assert_array_equal(job.result[0], job.result[1])
+            np.testing.assert_array_equal(job.result[1], job.result[2])
 
     def test_uint16_mono_identity(self):
         pixels = np.random.default_rng(3).integers(10000, 60000, (30, 40)).astype(np.uint16)
@@ -330,15 +411,67 @@ class WindowTests(unittest.TestCase):
         self.assertIsNone(self.w.worker)
         self.assertTrue(self.w.send_btn.isEnabled())
 
+    def select(self, model):
+        self.w.model.setCurrentIndex(list(A.MODELS).index(model))
+
     def test_rows_follow_model_and_mode(self):
         w = self.w
-        w.model.setCurrentIndex(list(A.MODELS).index("astroclean"))
+        self.select("astroclean")
         self.assertFalse(w.psf.isEnabled())
-        w.model.setCurrentIndex(list(A.MODELS).index("hybrid"))
+        self.assertTrue(w.mask_box.isHidden())
+        self.select("hybrid")
         w.mode.setCurrentIndex(list(A.MODES).index("parity"))
         self.assertTrue(w.form.isRowVisible(w.chunk))
+        self.assertFalse(w.form.isRowVisible(w.star_psf))
         w.mode.setCurrentIndex(list(A.MODES).index("seamless"))
         self.assertFalse(w.form.isRowVisible(w.chunk))
+
+    def test_rows_for_the_star_mask_models(self):
+        w = self.w
+        self.assertEqual(w.model.currentData(), "dual-psf", "Dual PSF is the default")
+        self.assertTrue(w.form.isRowVisible(w.star_psf))
+        self.assertEqual(w.form.labelForField(w.psf).text(), "DSO PSF FWHM (px)")
+        self.assertFalse(w.mask_box.isHidden())
+        w.mode.setCurrentIndex(list(A.MODES).index("parity"))
+        self.assertTrue(w.form.isRowVisible(w.chunk))
+        self.select("star-mask")
+        self.assertFalse(w.psf.isEnabled() or w.aggr.isEnabled())
+        self.assertFalse(w.form.isRowVisible(w.star_psf))
+        self.assertTrue(w.form.isRowVisible(w.mode))
+        self.assertFalse(w.form.isRowVisible(w.chunk))
+        self.assertFalse(w.mask_box.isHidden())
+        self.select("psf")
+        self.assertEqual(w.form.labelForField(w.psf).text(), "PSF FWHM (px)")
+        self.assertFalse(w.form.isRowVisible(w.mode))
+
+    def test_mask_settings_are_used_saved_and_reset(self):
+        w = self.w
+        w.star_psf.setValue(2.0)
+        w.sensitivity.setValue(95.0)
+        w.fix_mask.setValue(0)
+        w.feathering.setValue(2.5)
+        w.blend.setValue(2.0)
+        w.blend2.setValue(20.0)
+        expected = A.Params(star_psf=2.0, sensitivity=95.0, fix_mask=0, feathering=2.5,
+                            blend=2.0, blend2=20.0)
+        self.assertEqual(w.params(), expected)
+        w.start_preview()
+        self.wait()
+        self.assertEqual(w.status.text().split(" (")[0],
+                         "Preview: Dual PSF 3/2 aggr 0.66 mask 95/0/2.5/2/20")
+        with open(os.path.join(self.siril.configdir, A.CONFIG_NAME)) as f:
+            self.assertEqual(A.Params.from_dict(json.load(f)), expected)
+        w.set_mask(A.Params())
+        self.assertEqual(w.params(), A.Params(star_psf=2.0))
+
+    def test_star_mask_preview(self):
+        w = self.w
+        self.select("star-mask")
+        w.start_preview()
+        self.wait()
+        self.assertIsNotNone(w.view.after)
+        self.assertEqual(w.preview.result.shape, self.pixels.shape)
+        self.assertEqual(w.status.text().split(" (")[0], "Preview: Star Mask 98/2/5/9/100")
 
     def test_preview_then_send(self):
         w = self.w
@@ -348,12 +481,12 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(w.preview_btn.isEnabled())
         self.wait()
         self.assertIsNotNone(w.view.after)
-        self.assertEqual(w.status.text().split(" (")[0], "Preview: Hybrid PSF 2.5 aggr 0.50")
+        self.assertEqual(w.status.text().split(" (")[0], "Preview: Dual PSF 2.5/3 aggr 0.50")
         self.assertIsNone(self.siril.result, "preview must not change Siril's image")
 
         previewed = w.preview.result
         w.send()
-        self.assertEqual(self.siril.undo, ["AstroSharp: Hybrid PSF 2.5 aggr 0.50"])
+        self.assertEqual(self.siril.undo, ["AstroSharp: Dual PSF 2.5/3 aggr 0.50"])
         np.testing.assert_array_equal(self.siril.result, previewed)
         # The sent image becomes the new original.
         self.assertIsNone(w.view.after)
@@ -369,7 +502,7 @@ class WindowTests(unittest.TestCase):
         self.assertIn("Settings changed", w.status.text())
         w.send()
         self.wait()
-        self.assertEqual(self.siril.undo, ["AstroSharp: Hybrid PSF 3 aggr 0.90"])
+        self.assertEqual(self.siril.undo, ["AstroSharp: Dual PSF 3/3 aggr 0.90"])
 
     def test_refuses_to_send_if_siril_image_changed(self):
         w = self.w

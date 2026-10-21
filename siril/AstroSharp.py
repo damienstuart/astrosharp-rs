@@ -1,26 +1,31 @@
 # AstroSharp for Siril
 #
 # Runs AstroSharp (https://github.com/deepskydetail/AstroSharp, Rust port) on the image
-# currently loaded in Siril: sharpen (PSF), denoise (AstroClean) or both (Hybrid). The
-# image is updated in place with an undo point, so Siril's Undo restores it.
+# currently loaded in Siril: sharpen (PSF), denoise (AstroClean), both (Hybrid), sharpen
+# stars and the rest of the image with different PSFs (Dual PSF), or make its star mask
+# (Star Mask). The image is updated in place with an undo point, so Siril's Undo restores
+# it.
 #
 # AstroSharp is meant as a final touch-up on a stretched (non-linear) image.
 #
 # Requirements:
 #   - Siril 1.4 or later
-#   - AstroSharp 0.3.0 or later; its CLI is found in
-#     /Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli (or choose it in the window)
+#   - AstroSharp 0.3.0 or later (0.5.0 or later for Dual PSF and Star Mask); its CLI is
+#     found in /Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli (or choose it in
+#     the window)
 #
 # Usage:
 #   - From Siril's Scripts menu: opens a window with the settings and a preview with a
 #     before/after comparison; "Send to Siril" applies the previewed result.
 #   - From a Siril script (.ssf) or the command line, e.g.:
-#       pyscript AstroSharp.py -model hybrid -psf 3 -aggressiveness 0.66
+#       pyscript AstroSharp.py -model dual-psf -psf 3 -starpsf 2 -aggressiveness 0.66
 #     Options not given use the settings last saved from the window.
 #
-# Version: 0.2.0
+# Version: 0.3.0
 # 0.1.0: First version.
 # 0.2.0: Preview with zoom/pan and before/after divider; "Send to Siril".
+# 0.3.0: Dual PSF and Star Mask models (AstroSharp 0.5.0), with the star mask settings;
+#        Dual PSF is the default model.
 
 from __future__ import annotations
 
@@ -42,11 +47,15 @@ s.ensure_installed("PyQt6")
 
 import numpy as np  # noqa: E402 (installed with sirilpy)
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEFAULT_CLI = "/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli"
 MIN_CLI_VERSION = (0, 3, 0)
 CONFIG_NAME = "astrosharp.conf"
-MODELS = {"hybrid": "Hybrid", "psf": "PSF", "astroclean": "AstroClean"}
+MODELS = {"dual-psf": "Dual PSF", "hybrid": "Hybrid", "psf": "PSF",
+          "astroclean": "AstroClean", "star-mask": "Star Mask"}
+# Models that need a newer CLI than MIN_CLI_VERSION.
+MODEL_MIN_VERSION = {"dual-psf": (0, 5, 0), "star-mask": (0, 5, 0)}
+MASK_MODELS = ("dual-psf", "star-mask")
 MODES = {"seamless": "Seamless", "parity": "R parity"}
 FITS_BLOCK = 2880
 # Same rule as AstroSharp: 99% of pixels darker than this means the image looks linear.
@@ -55,11 +64,19 @@ LINEAR_P99 = 0.15
 
 @dataclass
 class Params:
-    model: str = "hybrid"
+    model: str = "dual-psf"
     psf: float = 3.0
     aggressiveness: float = 0.66
     mode: str = "seamless"
     chunk_size: int = 325
+    # Dual PSF: the PSF used on the stars (`psf` is used everywhere else).
+    star_psf: float = 3.0
+    # Star mask (Dual PSF and Star Mask), with the R app's defaults.
+    sensitivity: float = 98.0
+    fix_mask: int = 2
+    feathering: float = 5.0
+    blend: float = 9.0
+    blend2: float = 100.0
 
     @classmethod
     def from_dict(cls, d: dict) -> Params:
@@ -68,12 +85,27 @@ class Params:
             p.model = d["model"]
         if d.get("mode") in MODES:
             p.mode = d["mode"]
-        for key, kind in (("psf", float), ("aggressiveness", float), ("chunk_size", int)):
+        for key, kind in (("psf", float), ("aggressiveness", float), ("chunk_size", int),
+                          ("star_psf", float), ("sensitivity", float), ("fix_mask", int),
+                          ("feathering", float), ("blend", float), ("blend2", float)):
             try:
                 setattr(p, key, kind(d[key]))
             except (KeyError, TypeError, ValueError):
                 pass
         return p
+
+    def uses_mask(self) -> bool:
+        return self.model in MASK_MODELS
+
+    def mask_text(self) -> str:
+        """The star mask settings, e.g. `98/2/5/9/100` (sensitivity, fix mask, feathering,
+        blend, blend 2)."""
+        return "/".join(fmt(v) for v in (self.sensitivity, self.fix_mask, self.feathering,
+                                         self.blend, self.blend2))
+
+    def default_mask(self) -> bool:
+        d = Params()
+        return self.mask_text() == d.mask_text()
 
 
 # --- Helpers (no Siril or Qt needed) -------------------------------------------------
@@ -180,22 +212,50 @@ def fmt(x: float) -> str:
     return f"{x:g}"
 
 
+def fit_shape(result: np.ndarray, shape: tuple) -> np.ndarray:
+    """The CLI's output in the shape of Siril's image. A star mask of a colour image is a
+    single grey channel; it is repeated in each colour channel so the image stays RGB."""
+    if result.ndim == 2 and len(shape) == 3 and shape[0] == 3:
+        return np.repeat(result[np.newaxis], 3, axis=0)
+    return result.reshape(shape)
+
+
 def build_command(exe: str, inp: str, out: str, p: Params) -> list[str]:
+    """The CLI command. Options a model doesn't use are left out, so older CLIs still run
+    the models they have."""
     cmd = [exe, inp, out, "--model", p.model, "--psf", fmt(p.psf),
            "--aggressiveness", fmt(p.aggressiveness), "--mode", p.mode, "--depth", "32"]
-    if p.model == "hybrid" and p.mode == "parity":
+    if p.model == "dual-psf":
+        cmd += ["--star-psf", fmt(p.star_psf)]
+    if p.uses_mask():
+        cmd += ["--sensitivity", fmt(p.sensitivity), "--fix-mask", str(p.fix_mask),
+                "--feathering", fmt(p.feathering), "--blend", fmt(p.blend),
+                "--blend2", fmt(p.blend2)]
+    if p.model in ("hybrid", "dual-psf") and p.mode == "parity":
         cmd += ["--chunk-size", str(p.chunk_size)]
     return cmd
 
 
 def settings_text(p: Params) -> str:
-    """Short description of the settings, e.g. `Hybrid PSF 3 aggr 0.66`."""
+    """Short description of the settings, e.g. `Hybrid PSF 3 aggr 0.66`,
+    `Dual PSF 3/2 aggr 0.66` (DSO/star PSF) or `Star Mask 98/2/5/9/100`. Dual PSF lists
+    the star mask settings when they aren't the defaults."""
     parts = [MODELS[p.model]]
-    if p.model != "astroclean":
+    if p.model == "dual-psf":
+        parts.append(f"{fmt(p.psf)}/{fmt(p.star_psf)}")
+    elif p.model == "star-mask":
+        parts.append(p.mask_text())
+    elif p.model != "astroclean":
         parts.append(f"PSF {fmt(p.psf)}")
-    parts.append(f"aggr {p.aggressiveness:.2f}")
-    if p.model == "hybrid" and p.mode == "parity":
-        parts.append(f"R parity chunk {p.chunk_size}")
+    if p.model != "star-mask":
+        parts.append(f"aggr {p.aggressiveness:.2f}")
+    if p.mode == "parity":
+        if p.model in ("hybrid", "dual-psf"):
+            parts.append(f"parity chunk {p.chunk_size}")
+        elif p.model == "star-mask":
+            parts.append("parity")
+    if p.model == "dual-psf" and not p.default_mask():
+        parts.append(f"mask {p.mask_text()}")
     return " ".join(parts)
 
 
@@ -220,6 +280,15 @@ def find_executable(configured: Optional[str]) -> Optional[str]:
     return None
 
 
+def min_version(model: str) -> tuple[int, int, int]:
+    """The oldest AstroSharp CLI that has `model`."""
+    return MODEL_MIN_VERSION.get(model, MIN_CLI_VERSION)
+
+
+def version_text(version: tuple[int, int, int]) -> str:
+    return ".".join(map(str, version))
+
+
 def cli_version(exe: str) -> Optional[tuple[int, int, int]]:
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
@@ -229,8 +298,9 @@ def cli_version(exe: str) -> Optional[tuple[int, int, int]]:
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def check_executable(configured: Optional[str]) -> str:
-    """The usable CLI path, or raises RuntimeError explaining what is wrong."""
+def check_executable(configured: Optional[str], model: Optional[str] = None) -> str:
+    """The usable CLI path (for `model`, if given), or raises RuntimeError explaining what
+    is wrong."""
     exe = find_executable(configured)
     if exe is None:
         raise RuntimeError(
@@ -238,8 +308,10 @@ def check_executable(configured: Optional[str]) -> str:
             f"the CLI ({DEFAULT_CLI}) in the AstroSharp window.")
     version = cli_version(exe)
     if version is None or version < MIN_CLI_VERSION:
-        need = ".".join(map(str, MIN_CLI_VERSION))
-        raise RuntimeError(f"{exe} is not AstroSharp {need} or later.")
+        raise RuntimeError(f"{exe} is not AstroSharp {version_text(MIN_CLI_VERSION)} or later.")
+    if model is not None and version < min_version(model):
+        raise RuntimeError(f"{MODELS[model]} needs AstroSharp {version_text(min_version(model))} "
+                           f"or later; {exe} is {version_text(version)}.")
     return exe
 
 
@@ -294,8 +366,8 @@ class Job:
                                       capture_output=True, text=True)
                 self.code, self.stderr = proc.returncode, proc.stderr
                 if proc.returncode == 0:
-                    result = read_fits(out).reshape(self.pixels.shape)
-                    self.result = from_float(result, self.pixels.dtype)
+                    self.result = from_float(fit_shape(read_fits(out), self.pixels.shape),
+                                             self.pixels.dtype)
             except (OSError, ValueError) as e:
                 self.code, self.stderr = -1, str(e)
         self.seconds = time.monotonic() - started
@@ -343,11 +415,14 @@ def run_cli_mode(args) -> None:
     p = Params.from_dict(config)
     for key, value in (("model", args.model), ("psf", args.psf),
                        ("aggressiveness", args.aggressiveness), ("mode", args.mode),
-                       ("chunk_size", args.chunksize)):
+                       ("chunk_size", args.chunksize), ("star_psf", args.starpsf),
+                       ("sensitivity", args.sensitivity), ("fix_mask", args.fixmask),
+                       ("feathering", args.feathering), ("blend", args.blend),
+                       ("blend2", args.blend2)):
         if value is not None:
             setattr(p, key, value)
     try:
-        exe = check_executable(args.executable or config.get("executable"))
+        exe = check_executable(args.executable or config.get("executable"), p.model)
         if args.executable:
             save_config(siril, exe, Params.from_dict(config))
         job = Job.from_siril(siril, exe, p)
@@ -368,9 +443,9 @@ def create_window(siril):
     without it)."""
     from PyQt6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal
     from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
-    from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
-                                 QLabel, QLineEdit, QPushButton, QSlider, QSpinBox,
-                                 QVBoxLayout, QWidget)
+    from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+                                 QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                                 QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
     accent = QColor(255, 200, 40)
 
@@ -611,6 +686,7 @@ def create_window(siril):
             self.before_fp: Optional[str] = None    # image shown as "original"
             self.send_when_done = False
             self.rerun = False
+            self.cli: tuple = (None, None)  # (CLI path, its version), for the version label
             config = load_config(siril)
             p = Params.from_dict(config)
             self.setWindowTitle(f"AstroSharp – v{VERSION}")
@@ -622,7 +698,12 @@ def create_window(siril):
             self.psf = ValueSlider(1.0, 8.0, step=0.25, page=1.0)
             self.psf.setValue(p.psf)
             self.psf.setToolTip("70% of the PSF in pixels: measure the FWHM of a small, "
-                                "unsaturated star and divide by 2.35.")
+                                "unsaturated star and divide by 2.35. For Dual PSF, the "
+                                "model used away from the stars (the deep-sky object).")
+            self.star_psf = ValueSlider(1.0, 8.0, step=0.25, page=1.0)
+            self.star_psf.setValue(p.star_psf)
+            self.star_psf.setToolTip("Dual PSF: the PSF model used on the stars, where the "
+                                     "star mask is set.")
             self.aggr = ValueSlider(0.01, 1.0, step=0.01, page=0.1)
             self.aggr.setValue(p.aggressiveness)
             self.aggr.setToolTip("Blend between the model output (1) and the input (0).")
@@ -630,8 +711,9 @@ def create_window(siril):
             for key, name in MODES.items():
                 self.mode.addItem(name, key)
             self.mode.setCurrentIndex(list(MODES).index(p.mode))
-            self.mode.setToolTip("Seamless: whole-image processing at full precision. "
-                                 "R parity: reproduces the original R app exactly.")
+            self.mode.setToolTip("Seamless: whole-image processing at full precision, with "
+                                 "one star mask for the whole image. R parity: reproduces "
+                                 "the original R app exactly.")
             self.chunk = QSpinBox(minimum=50, maximum=750)
             self.chunk.setValue(p.chunk_size)
             self.chunk.setMinimumWidth(90)
@@ -640,9 +722,50 @@ def create_window(siril):
             self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             self.form.addRow("Model", self.model)
             self.form.addRow("PSF FWHM (px)", self.psf)
+            self.form.addRow("Star PSF FWHM (px)", self.star_psf)
             self.form.addRow("Aggressiveness", self.aggr)
             self.form.addRow("Mode", self.mode)
             self.form.addRow("Chunk size", self.chunk)
+
+            # Star mask (Dual PSF and Star Mask), with the R app's names.
+            self.sensitivity = QDoubleSpinBox(minimum=1.0, maximum=100.0, decimals=1,
+                                              singleStep=0.5)
+            self.sensitivity.setToolTip("Percentile of the star response above which pixels "
+                                        "count as stars: higher finds fewer stars.")
+            self.fix_mask = QSpinBox(minimum=0, maximum=1000)
+            self.fix_mask.setToolTip("Leaves out the first regions found scanning down each "
+                                     "column from the left, up to this number. Region 0 is "
+                                     "normally the background; raise it to drop artefacts "
+                                     "at the left edge.")
+            self.feathering = QDoubleSpinBox(minimum=0.0, maximum=30.0, decimals=2,
+                                             singleStep=0.5)
+            self.feathering.setToolTip("Blur (sigma, px) of the mask edges; below 0.1 there "
+                                       "is none.")
+            self.blend = QDoubleSpinBox(minimum=0.01, maximum=10000.0, decimals=2,
+                                        singleStep=0.05)
+            self.blend2 = QDoubleSpinBox(minimum=0.01, maximum=10000.0, decimals=2,
+                                         singleStep=0.05)
+            for w in (self.blend, self.blend2):
+                w.setToolTip("Shape of the beta curve that turns the feathered mask into "
+                             "weights: it rises around Blend / (Blend + Blend 2), more "
+                             "steeply the larger they are.")
+            for w in (self.sensitivity, self.fix_mask, self.feathering, self.blend,
+                      self.blend2):
+                w.setMinimumWidth(90)
+            self.set_mask(p)
+            mask_defaults = QPushButton("Defaults")
+            mask_defaults.setToolTip("Restore the R app's star mask settings.")
+            mask_defaults.clicked.connect(lambda: self.set_mask(Params()))
+            mask_form = QFormLayout()
+            mask_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            mask_form.addRow("Sensitivity", self.sensitivity)
+            mask_form.addRow("Fix mask", self.fix_mask)
+            mask_form.addRow("Feathering", self.feathering)
+            mask_form.addRow("Blend", self.blend)
+            mask_form.addRow("Blend 2", self.blend2)
+            mask_form.addRow("", mask_defaults)
+            self.mask_box = QGroupBox("Star mask")
+            self.mask_box.setLayout(mask_form)
 
             self.live = QCheckBox("Live preview")
             self.live.setToolTip("Update the preview automatically when a setting changes.")
@@ -688,6 +811,7 @@ def create_window(siril):
 
             panel = QVBoxLayout()
             panel.addLayout(self.form)
+            panel.addWidget(self.mask_box)
             panel.addWidget(self.live)
             panel.addSpacing(8)
             panel.addWidget(self.compare)
@@ -716,12 +840,12 @@ def create_window(siril):
             self.timer.timeout.connect(self.start_preview)
             for w in (self.model, self.mode):
                 w.currentIndexChanged.connect(self.settings_changed)
-            for w in (self.psf, self.aggr, self.chunk):
+            for w in (self.psf, self.star_psf, self.aggr, self.chunk, self.sensitivity,
+                      self.fix_mask, self.feathering, self.blend, self.blend2):
                 w.valueChanged.connect(self.settings_changed)
             self.compare.toggled.connect(self.view.set_compare)
             self.exe.editingFinished.connect(self.update_version)
-            self.update_rows()
-            self.update_version()
+            self.update_rows()  # also shows the CLI version
             self.refresh_original()
             self.update_buttons()
 
@@ -729,7 +853,18 @@ def create_window(siril):
 
         def params(self) -> Params:
             return Params(self.model.currentData(), self.psf.value(), self.aggr.value(),
-                          self.mode.currentData(), self.chunk.value())
+                          self.mode.currentData(), self.chunk.value(), self.star_psf.value(),
+                          round(self.sensitivity.value(), 6), self.fix_mask.value(),
+                          round(self.feathering.value(), 6), round(self.blend.value(), 6),
+                          round(self.blend2.value(), 6))
+
+        def set_mask(self, p: Params):
+            """Shows `p`'s star mask settings."""
+            self.sensitivity.setValue(p.sensitivity)
+            self.fix_mask.setValue(p.fix_mask)
+            self.feathering.setValue(p.feathering)
+            self.blend.setValue(p.blend)
+            self.blend2.setValue(p.blend2)
 
         def preview_current(self) -> bool:
             return self.preview is not None and self.preview.params == self.params()
@@ -738,10 +873,18 @@ def create_window(siril):
             return self.worker is not None and self.worker.isRunning()
 
         def update_rows(self):
-            hybrid = self.model.currentData() == "hybrid"
-            self.psf.setEnabled(self.model.currentData() != "astroclean")
-            self.form.setRowVisible(self.mode, hybrid)
-            self.form.setRowVisible(self.chunk, hybrid and self.mode.currentData() == "parity")
+            model = self.model.currentData()
+            dual = model == "dual-psf"
+            self.psf.setEnabled(model not in ("astroclean", "star-mask"))
+            self.form.labelForField(self.psf).setText(
+                "DSO PSF FWHM (px)" if dual else "PSF FWHM (px)")
+            self.form.setRowVisible(self.star_psf, dual)
+            self.aggr.setEnabled(model != "star-mask")
+            self.form.setRowVisible(self.mode, model in ("hybrid", "dual-psf", "star-mask"))
+            self.form.setRowVisible(self.chunk, model in ("hybrid", "dual-psf")
+                                    and self.mode.currentData() == "parity")
+            self.mask_box.setVisible(model in MASK_MODELS)
+            self.update_version()
 
         def update_buttons(self):
             loaded = self.view.before is not None
@@ -800,7 +943,7 @@ def create_window(siril):
                 return
             p = self.params()
             try:
-                exe = check_executable(self.exe.text())
+                exe = check_executable(self.exe.text(), p.model)
                 save_config(self.siril, exe, p)
                 job = Job.from_siril(self.siril, exe, p)
             except Exception as e:
@@ -878,12 +1021,21 @@ def create_window(siril):
 
         def update_version(self):
             exe = find_executable(self.exe.text())
-            version = cli_version(exe) if exe else None
+            if exe != self.cli[0]:
+                self.cli = (exe, cli_version(exe) if exe else None)
+            version = self.cli[1]
             if version is None:
                 self.version.setText("CLI not found")
+                return
+            model = self.model.currentData()
+            need = min_version(model)
+            if version < MIN_CLI_VERSION:
+                note = f" (too old; {version_text(MIN_CLI_VERSION)} or later needed)"
+            elif version < need:
+                note = f" (too old for {MODELS[model]}; {version_text(need)} or later needed)"
             else:
-                ok = "" if version >= MIN_CLI_VERSION else " (too old; 0.3.0 or later needed)"
-                self.version.setText(f"AstroSharp {'.'.join(map(str, version))}{ok}")
+                note = ""
+            self.version.setText(f"AstroSharp {version_text(version)}{note}")
 
         def browse(self):
             path, _ = QFileDialog.getOpenFileName(
@@ -891,6 +1043,7 @@ def create_window(siril):
                 os.path.dirname(self.exe.text()) or "/Applications")
             if path:
                 self.exe.setText(resolve_executable(path))
+                self.cli = (None, None)  # check again, even if it's the same path
                 self.update_version()
 
         def closeEvent(self, event):
@@ -920,11 +1073,22 @@ def run_gui_mode() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run AstroSharp on the current Siril image.")
-    parser.add_argument("-model", choices=list(MODELS), help="hybrid, psf or astroclean")
-    parser.add_argument("-psf", type=float, help="PSF FWHM in pixels (1-8, steps of 0.25)")
+    parser.add_argument("-model", choices=list(MODELS),
+                        help="dual-psf, hybrid, psf, astroclean or star-mask")
+    parser.add_argument("-psf", type=float, help="PSF FWHM in pixels (1-8, steps of 0.25); "
+                        "for dual-psf, the one used away from stars")
+    parser.add_argument("-starpsf", type=float, help="dual-psf: PSF FWHM for the stars")
     parser.add_argument("-aggressiveness", type=float, help="blend amount (0-1)")
     parser.add_argument("-mode", choices=list(MODES), help="seamless or parity")
-    parser.add_argument("-chunksize", type=int, help="chunk size for hybrid in parity mode")
+    parser.add_argument("-chunksize", type=int,
+                        help="chunk size for hybrid and dual-psf in parity mode")
+    parser.add_argument("-sensitivity", type=float,
+                        help="star mask: percentile above which pixels are stars (0-100)")
+    parser.add_argument("-fixmask", type=int,
+                        help="star mask: leave out the regions numbered up to this")
+    parser.add_argument("-feathering", type=float, help="star mask: edge blur sigma (px)")
+    parser.add_argument("-blend", type=float, help="star mask: beta curve shape a")
+    parser.add_argument("-blend2", type=float, help="star mask: beta curve shape b")
     parser.add_argument("-executable", help="path to astrosharp-cli (or AstroSharp.app)")
     args = parser.parse_args()
     if len(sys.argv) > 1:
