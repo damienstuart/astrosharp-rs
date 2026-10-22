@@ -25,6 +25,8 @@ looks linear, the script logs a warning in Siril's console, but it still process
   at `Contents/MacOS/astrosharp-cli`, in `/Applications`. The script finds it there;
   otherwise choose the CLI, or `AstroSharp.app` itself, with **Browse…**.
   - The window shows the CLI's version, with a note if it's too old for the chosen model.
+  - With AstroSharp 0.5.1 or later the progress bars show a percentage; with earlier
+    versions they show that it's busy.
 
 ## Install
 
@@ -50,8 +52,10 @@ The script appears in the **Scripts** menu.
       Tune the mask with Star Mask, then switch to Dual PSF.
     - **Star Mask on a colour image** gives a grey mask in all three channels, so the
       image stays RGB.
-  - **Preview** processes a copy of the image; Siril's image is not changed. **Live
-    preview** (off by default) refreshes it whenever a setting changes.
+  - **Process** processes a copy of the image to preview the result; Siril's image is not
+    changed. **Live preview** (off by default) refreshes it whenever a setting changes.
+  - **Progress:** while it runs, a progress bar under the buttons and Siril's own progress
+    bar show how far it has got.
   - **Viewing:** scroll to zoom, drag to pan, double-click to fit, and hold Space to see
     the original. **Compare before/after** adds a divider; drag its handle to move it.
   - **Reset** discards the preview and reloads the image from Siril, for example after
@@ -89,8 +93,8 @@ The script appears in the **Scripts** menu.
 
 1. **Export:** the script takes the current image from Siril (16-bit or 32-bit float) and
    writes it to a temporary 32-bit FITS file, in Siril's row order.
-2. **Process:** the AstroSharp CLI runs on that file in the background. Siril's progress bar
-   pulses while it works; a 24 MP image takes a few seconds.
+2. **Process:** the AstroSharp CLI runs on that file in the background; a 24 MP image takes
+   a few seconds. Its `--progress` output drives the progress bars.
 3. **Write back:** the result is put back into Siril with an undo point. The image keeps its
    original bit depth, and Siril keeps its own header and colour profile.
 
@@ -106,10 +110,13 @@ The tests cover:
 - The command line for each model, the HISTORY text and the per-model CLI version check.
 - The processing flow against a fake Siril, using the real CLI, for Hybrid, Dual PSF and
   Star Mask (which keeps colour images RGB).
+- Progress: reading the CLI's progress lines (with a stand-in CLI, and with the real one
+  if it's 0.5.1 or later).
 - The preview window, off-screen: preview without touching Siril, sending exactly the
   previewed result, processing first when settings changed, refusing to send when Siril's
   image changed, Reset, live preview, field widths, dragging the divider, the rows each
-  model shows, and saving and restoring the star mask settings.
+  model shows, saving and restoring the star mask settings, and the progress bar (a
+  percentage, or a busy bar with an older CLI).
 - With `ASTROSHARP_FITS`: a check that processing through the script gives results
   bit-identical to running the CLI directly on the file.
 
@@ -118,19 +125,21 @@ They don't need Siril. Set `ASTROSHARP_CLI` to use a CLI other than the one in
 
 ### Manual check in Siril
 
-- [ ] Open a stretched FITS and run **Scripts → AstroSharp**. The image appears; Preview
+- [ ] Open a stretched FITS and run **Scripts → AstroSharp**. The image appears; Process
       shows the processed version, and the image in Siril is unchanged.
+- [ ] On a large image, the progress bar under the buttons and Siril's progress bar both
+      advance while it processes, then the window's bar disappears.
 - [ ] Zoom, pan, hold Space, and drag the Compare divider.
 - [ ] Reset clears the preview and shows Siril's current image again.
 - [ ] Send to Siril updates Siril's image, and the console shows a green "applied" line.
       Ctrl/Cmd+Z restores the original; Image → FITS header shows the HISTORY line after
       sending again.
-- [ ] Preview, then change the image in Siril (for example with Undo), then Send to Siril.
+- [ ] Process, then change the image in Siril (for example with Undo), then Send to Siril.
       The script warns instead of overwriting.
 - [ ] Repeat with a 16-bit image (the bit depth is unchanged afterwards).
 - [ ] Open a linear stack. The window shows the "looks linear" note, and processing logs a
       salmon note in the console.
-- [ ] Choose Star Mask and Preview: the mask appears. Change Sensitivity or Feathering and
-      Preview again; then choose Dual PSF with a smaller Star PSF and Send to Siril.
+- [ ] Choose Star Mask and Process: the mask appears. Change Sensitivity or Feathering and
+      Process again; then choose Dual PSF with a smaller Star PSF and Send to Siril.
 - [ ] In a `.ssf` script: `pyscript AstroSharp.py -model psf -psf 2.5` processes the loaded
       image without opening the window.

@@ -10,22 +10,24 @@
 #
 # Requirements:
 #   - Siril 1.4 or later
-#   - AstroSharp 0.3.0 or later (0.5.0 or later for Dual PSF and Star Mask); its CLI is
-#     found in /Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli (or choose it in
-#     the window)
+#   - AstroSharp 0.3.0 or later (0.5.0 or later for Dual PSF and Star Mask; 0.5.1 or later
+#     for a progress percentage); its CLI is found in
+#     /Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli (or choose it in the window)
 #
 # Usage:
 #   - From Siril's Scripts menu: opens a window with the settings and a preview with a
-#     before/after comparison; "Send to Siril" applies the previewed result.
+#     before/after comparison; "Process" makes the preview and "Send to Siril" applies it.
 #   - From a Siril script (.ssf) or the command line, e.g.:
 #       pyscript AstroSharp.py -model dual-psf -psf 3 -starpsf 2 -aggressiveness 0.66
 #     Options not given use the settings last saved from the window.
 #
-# Version: 0.3.0
+# Version: 0.4.0
 # 0.1.0: First version.
 # 0.2.0: Preview with zoom/pan and before/after divider; "Send to Siril".
 # 0.3.0: Dual PSF and Star Mask models (AstroSharp 0.5.0), with the star mask settings;
 #        Dual PSF is the default model.
+# 0.4.0: Progress bar while processing (a percentage with AstroSharp 0.5.1); the Preview
+#        button is now "Process".
 
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import sirilpy as s
 
@@ -47,7 +49,7 @@ s.ensure_installed("PyQt6")
 
 import numpy as np  # noqa: E402 (installed with sirilpy)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_CLI = "/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli"
 MIN_CLI_VERSION = (0, 3, 0)
 CONFIG_NAME = "astrosharp.conf"
@@ -56,6 +58,9 @@ MODELS = {"dual-psf": "Dual PSF", "hybrid": "Hybrid", "psf": "PSF",
 # Models that need a newer CLI than MIN_CLI_VERSION.
 MODEL_MIN_VERSION = {"dual-psf": (0, 5, 0), "star-mask": (0, 5, 0)}
 MASK_MODELS = ("dual-psf", "star-mask")
+# The first CLI that reports progress (--progress).
+PROGRESS_VERSION = (0, 5, 1)
+PROGRESS_MESSAGE = "AstroSharp: processing…"
 MODES = {"seamless": "Seamless", "parity": "R parity"}
 FITS_BLOCK = 2880
 # Same rule as AstroSharp: 99% of pixels darker than this means the image looks linear.
@@ -220,9 +225,11 @@ def fit_shape(result: np.ndarray, shape: tuple) -> np.ndarray:
     return result.reshape(shape)
 
 
-def build_command(exe: str, inp: str, out: str, p: Params) -> list[str]:
+def build_command(exe: str, inp: str, out: str, p: Params,
+                  progress: bool = False) -> list[str]:
     """The CLI command. Options a model doesn't use are left out, so older CLIs still run
-    the models they have."""
+    the models they have. With `progress`, the CLI reports progress on stdout (0.5.1 or
+    later)."""
     cmd = [exe, inp, out, "--model", p.model, "--psf", fmt(p.psf),
            "--aggressiveness", fmt(p.aggressiveness), "--mode", p.mode, "--depth", "32"]
     if p.model == "dual-psf":
@@ -233,7 +240,19 @@ def build_command(exe: str, inp: str, out: str, p: Params) -> list[str]:
                 "--blend2", fmt(p.blend2)]
     if p.model in ("hybrid", "dual-psf") and p.mode == "parity":
         cmd += ["--chunk-size", str(p.chunk_size)]
+    if progress:
+        cmd.append("--progress")
     return cmd
+
+
+def parse_progress(line: str) -> Optional[float]:
+    """The fraction in a `progress <fraction>` line from the CLI, or None."""
+    if line.startswith("progress "):
+        try:
+            return min(max(float(line[9:]), 0.0), 1.0)
+        except ValueError:
+            pass
+    return None
 
 
 def settings_text(p: Params) -> str:
@@ -289,6 +308,11 @@ def version_text(version: tuple[int, int, int]) -> str:
     return ".".join(map(str, version))
 
 
+def has_progress(version: Optional[tuple[int, int, int]]) -> bool:
+    """Whether a CLI of this version can report progress."""
+    return version is not None and version >= PROGRESS_VERSION
+
+
 def cli_version(exe: str) -> Optional[tuple[int, int, int]]:
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
@@ -339,21 +363,24 @@ class Job:
     get_image_pixeldata). `run` does all the heavy work and is safe in a worker thread;
     `apply` (main thread) puts the result into Siril."""
 
-    def __init__(self, pixels: np.ndarray, exe: str, params: Params):
+    def __init__(self, pixels: np.ndarray, exe: str, params: Params, progress: bool = False):
         self.pixels, self.exe, self.params = pixels, exe, params
+        # Whether the CLI reports progress (see has_progress).
+        self.progress = progress
         self.code: Optional[int] = None
         self.stderr = ""
         self.result: Optional[np.ndarray] = None
         self.seconds = 0.0
 
     @classmethod
-    def from_siril(cls, siril, exe: str, params: Params) -> Job:
+    def from_siril(cls, siril, exe: str, params: Params, progress: bool = False) -> Job:
         if not siril.is_image_loaded():
             raise RuntimeError("No image is loaded in Siril.")
-        return cls(siril.get_image_pixeldata(), exe, params)
+        return cls(siril.get_image_pixeldata(), exe, params, progress)
 
-    def run(self) -> None:
-        """Runs the CLI on a temporary FITS copy and reads the result back."""
+    def run(self, on_progress: Optional[Callable[[float], None]] = None) -> None:
+        """Runs the CLI on a temporary FITS copy and reads the result back. If the CLI
+        reports progress, `on_progress` gets each fraction (0 to 1) as it arrives."""
         started = time.monotonic()
         data = to_float(self.pixels)
         if data.ndim == 3 and data.shape[0] == 1:
@@ -362,15 +389,33 @@ class Job:
             inp, out = os.path.join(tmp, "in.fit"), os.path.join(tmp, "out.fit")
             try:
                 write_fits(inp, data)
-                proc = subprocess.run(build_command(self.exe, inp, out, self.params),
-                                      capture_output=True, text=True)
-                self.code, self.stderr = proc.returncode, proc.stderr
-                if proc.returncode == 0:
+                self.code, self.stderr = self.run_cli(inp, out, tmp, on_progress)
+                if self.code == 0:
                     self.result = from_float(fit_shape(read_fits(out), self.pixels.shape),
                                              self.pixels.dtype)
             except (OSError, ValueError) as e:
                 self.code, self.stderr = -1, str(e)
         self.seconds = time.monotonic() - started
+
+    def run_cli(self, inp: str, out: str, tmp: str,
+                on_progress: Optional[Callable[[float], None]]) -> tuple[int, str]:
+        """Runs the CLI, passing its progress lines to `on_progress` (if it was asked to
+        report progress). Returns its exit code and stderr (kept in a file, so a full pipe
+        can never stall it)."""
+        cmd = build_command(self.exe, inp, out, self.params, self.progress)
+        if not self.progress:
+            on_progress = None
+        with open(os.path.join(tmp, "stderr.txt"), "w+") as err:
+            with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True) as proc:
+                for line in proc.stdout:
+                    fraction = parse_progress(line)
+                    if fraction is not None and on_progress is not None:
+                        try:
+                            on_progress(fraction)
+                        except Exception:  # progress is only shown; never stop the run
+                            pass
+            err.seek(0)
+            return proc.returncode, err.read()
 
     def notes(self) -> list[str]:
         return [line for line in self.stderr.splitlines() if line.startswith("note:")]
@@ -425,10 +470,10 @@ def run_cli_mode(args) -> None:
         exe = check_executable(args.executable or config.get("executable"), p.model)
         if args.executable:
             save_config(siril, exe, Params.from_dict(config))
-        job = Job.from_siril(siril, exe, p)
-        siril.update_progress("AstroSharp: processing…", -1.0)
+        job = Job.from_siril(siril, exe, p, has_progress(cli_version(exe)))
+        siril.update_progress(PROGRESS_MESSAGE, 0.0 if job.progress else -1.0)
         try:
-            job.run()
+            job.run(on_progress=lambda f: siril.update_progress(PROGRESS_MESSAGE, f))
         finally:
             siril.reset_progress()
         job.log_notes(siril)
@@ -445,7 +490,8 @@ def create_window(siril):
     from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
     from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                  QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                                 QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
+                                 QProgressBar, QPushButton, QSlider, QSpinBox, QVBoxLayout,
+                                 QWidget)
 
     accent = QColor(255, 200, 40)
 
@@ -491,6 +537,7 @@ def create_window(siril):
 
     class Worker(QThread):
         done = pyqtSignal()
+        progress = pyqtSignal(float)
 
         def __init__(self, job: Job):
             super().__init__()
@@ -498,7 +545,7 @@ def create_window(siril):
             self.display: Optional[np.ndarray] = None
 
         def run(self):
-            self.job.run()
+            self.job.run(on_progress=self.progress.emit)
             if self.job.result is not None:
                 self.display = display_u8(self.job.result)
             self.done.emit()
@@ -776,8 +823,10 @@ def create_window(siril):
             help_text.setWordWrap(True)
             help_text.setStyleSheet("color: gray; font-size: 11px;")
 
-            self.preview_btn = QPushButton("Preview")
-            self.preview_btn.clicked.connect(lambda: self.start_preview())
+            self.process_btn = QPushButton("Process")
+            self.process_btn.setToolTip("Process a copy of the image to preview the result; "
+                                        "Siril's image isn't changed.")
+            self.process_btn.clicked.connect(lambda: self.start_preview())
             self.reset_btn = QPushButton("Reset")
             self.reset_btn.setToolTip("Discard the preview and reload the image from Siril.")
             self.reset_btn.clicked.connect(lambda: self.reset())
@@ -787,11 +836,15 @@ def create_window(siril):
                                      "(with an undo point).")
             self.send_btn.clicked.connect(lambda: self.send())
             actions = QHBoxLayout()
-            actions.addWidget(self.preview_btn)
+            actions.addWidget(self.process_btn)
             actions.addWidget(self.reset_btn)
             actions.addWidget(self.send_btn)
 
-            self.status = QLabel("Press Preview to see the result.")
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 1000)
+            self.progress.setFormat("%p%")
+            self.progress.hide()
+            self.status = QLabel("Press Process to see the result.")
             self.status.setWordWrap(True)
             self.linear_note = QLabel("This image looks linear (unstretched). AstroSharp is "
                                       "meant as a final touch-up on a stretched image.")
@@ -818,6 +871,7 @@ def create_window(siril):
             panel.addWidget(help_text)
             panel.addSpacing(8)
             panel.addLayout(actions)
+            panel.addWidget(self.progress)
             panel.addWidget(self.status)
             panel.addWidget(self.linear_note)
             panel.addStretch()
@@ -889,7 +943,7 @@ def create_window(siril):
         def update_buttons(self):
             loaded = self.view.before is not None
             idle = not self.running()
-            self.preview_btn.setEnabled(loaded and idle)
+            self.process_btn.setEnabled(loaded and idle)
             self.send_btn.setEnabled(loaded and idle)
             self.reset_btn.setEnabled(idle)
 
@@ -932,7 +986,7 @@ def create_window(siril):
             self.refresh_original()
             self.view.set_after(None)
             if self.view.before is not None:
-                self.status.setText("Showing Siril's current image. Press Preview to see the "
+                self.status.setText("Showing Siril's current image. Press Process to see the "
                                     "result.")
             self.update_buttons()
 
@@ -945,24 +999,35 @@ def create_window(siril):
             try:
                 exe = check_executable(self.exe.text(), p.model)
                 save_config(self.siril, exe, p)
-                job = Job.from_siril(self.siril, exe, p)
+                job = Job.from_siril(self.siril, exe, p, has_progress(cli_version(exe)))
             except Exception as e:
                 self.fail(str(e))
                 return
             self.show_original(job.pixels)
             self.send_when_done = send
             self.status.setText("Processing…")
-            self.siril.update_progress("AstroSharp: processing…", -1.0)
+            # A percentage if the CLI reports progress, otherwise a busy bar.
+            self.progress.setRange(0, 1000 if job.progress else 0)
+            self.progress.setValue(0)
+            self.progress.show()
+            self.siril.update_progress(PROGRESS_MESSAGE, 0.0 if job.progress else -1.0)
             self.worker = Worker(job)
-            # A bound method of this (main-thread) widget, so Qt delivers it on the GUI thread.
+            # Bound methods of this (main-thread) widget, so Qt delivers the signals on the
+            # GUI thread.
+            self.worker.progress.connect(self.show_progress)
             self.worker.done.connect(self.preview_done)
             self.worker.start()
             self.update_buttons()
+
+        def show_progress(self, fraction: float):
+            self.progress.setValue(round(fraction * 1000))
+            self.siril.update_progress(PROGRESS_MESSAGE, fraction)
 
         def preview_done(self):
             worker = self.worker
             job = worker.job
             worker.wait()
+            self.progress.hide()
             self.siril.reset_progress()
             self.update_buttons()
             job.log_notes(self.siril)
@@ -995,7 +1060,7 @@ def create_window(siril):
                 return
             if fingerprint(current) != self.preview_fp:
                 self.show_original(current)
-                message = ("The image in Siril changed since the preview. Press Preview "
+                message = ("The image in Siril changed since the preview. Press Process "
                            "again (or Send to Siril to process and send).")
                 self.status.setText(message)
                 self.siril.warning_messagebox(message)

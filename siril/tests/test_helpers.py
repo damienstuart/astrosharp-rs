@@ -129,6 +129,22 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(cmd[-10:], ["--sensitivity", "95.5", "--fix-mask", "0",
                                      "--feathering", "2.5", "--blend", "2", "--blend2", "20"])
 
+    def test_build_command_with_progress(self):
+        p = A.Params(model="hybrid")
+        plain = A.build_command("cli", "i", "o", p)
+        self.assertNotIn("--progress", plain)
+        self.assertEqual(A.build_command("cli", "i", "o", p, progress=True), plain + ["--progress"])
+
+    def test_parse_progress(self):
+        self.assertEqual(A.parse_progress("progress 0.250\n"), 0.25)
+        self.assertEqual(A.parse_progress("progress 1.000"), 1.0)
+        self.assertEqual(A.parse_progress("progress 1.5"), 1.0)
+        for line in ("note: hello", "progress", "progress x", ""):
+            self.assertIsNone(A.parse_progress(line), line)
+        self.assertFalse(A.has_progress(None))
+        self.assertFalse(A.has_progress((0, 5, 0)))
+        self.assertTrue(A.has_progress((0, 5, 1)))
+
     def test_history_text(self):
         hybrid = A.Params(model="hybrid")
         self.assertEqual(A.history_text(hybrid), "AstroSharp: Hybrid PSF 3 aggr 0.66")
@@ -202,6 +218,60 @@ class CommandTests(unittest.TestCase):
 
 CLI = os.environ.get("ASTROSHARP_CLI", A.DEFAULT_CLI)
 HAVE_CLI = os.access(CLI, os.X_OK)
+CLI_HAS_PROGRESS = HAVE_CLI and A.has_progress(A.cli_version(CLI))
+
+
+def fake_cli(directory, version="0.5.1", delay=0.0):
+    """A stand-in CLI that prints progress (and a stray line), then copies its input to
+    its output. Returns its path."""
+    exe = Path(directory) / "astrosharp-cli"
+    exe.write_text(f"""#!/bin/sh
+if [ "$1" = "--version" ]; then echo "astrosharp-cli {version}"; exit 0; fi
+for f in 0.250 0.500; do echo "progress $f"; sleep {delay}; done
+echo "something else"
+echo "progress 1.000"
+echo "note: from the fake CLI" >&2
+cp "$1" "$2"
+""")
+    exe.chmod(0o755)
+    return str(exe)
+
+
+class ProgressTests(unittest.TestCase):
+    def test_job_reports_progress_from_the_cli(self):
+        pixels = np.random.default_rng(9).uniform(0.2, 0.8, (3, 20, 30)).astype(np.float32)
+        with tempfile.TemporaryDirectory() as d:
+            exe = fake_cli(d)
+            job = A.Job(pixels, exe, A.Params(), progress=A.has_progress(A.cli_version(exe)))
+            self.assertTrue(job.progress)
+            seen = []
+            job.run(on_progress=seen.append)
+        self.assertEqual(seen, [0.25, 0.5, 1.0])
+        self.assertEqual(job.code, 0)
+        self.assertEqual(job.notes(), ["note: from the fake CLI"])
+        np.testing.assert_array_equal(job.result, pixels)
+
+    def test_failing_progress_callback_does_not_stop_the_run(self):
+        pixels = np.full((10, 12), 0.5, np.float32)
+        with tempfile.TemporaryDirectory() as d:
+            job = A.Job(pixels, fake_cli(d), A.Params(), progress=True)
+
+            def broken(_):
+                raise RuntimeError("Siril went away")
+
+            job.run(on_progress=broken)
+        np.testing.assert_array_equal(job.result, pixels)
+
+    @unittest.skipUnless(CLI_HAS_PROGRESS, "needs ASTROSHARP_CLI 0.5.1 or later")
+    def test_real_cli_progress_rises_to_one(self):
+        pixels = np.random.default_rng(10).uniform(0.2, 0.8, (3, 200, 240)).astype(np.float32)
+        job = A.Job(pixels, CLI, A.Params(star_psf=2.0), progress=True)
+        seen = []
+        job.run(on_progress=seen.append)
+        self.assertIsNotNone(job.result, job.stderr)
+        self.assertTrue(seen)
+        self.assertEqual(seen, sorted(seen))
+        self.assertEqual(seen[-1], 1.0)
 SAMPLE = os.environ.get("ASTROSHARP_FITS", "")
 
 
@@ -478,7 +548,7 @@ class WindowTests(unittest.TestCase):
         w.psf.setValue(2.5)
         w.aggr.setValue(0.5)
         w.start_preview()
-        self.assertFalse(w.preview_btn.isEnabled())
+        self.assertFalse(w.process_btn.isEnabled())
         self.wait()
         self.assertIsNotNone(w.view.after)
         self.assertEqual(w.status.text().split(" (")[0], "Preview: Dual PSF 2.5/3 aggr 0.50")
@@ -557,6 +627,52 @@ class WindowTests(unittest.TestCase):
         self.wait()
         self.assertTrue(w.preview_current())
         self.assertIsNone(self.siril.result, "live preview must not change Siril's image")
+
+    def test_process_button(self):
+        self.assertEqual(self.w.process_btn.text(), "Process")
+        self.assertIn("Press Process", self.w.status.text())
+
+    def run_with_fake_cli(self, version):
+        """Processes with a slow fake CLI; returns the progress bar's (visible, range, value)
+        seen while it ran, and the fractions Siril's progress bar got."""
+        w = self.w
+        with tempfile.TemporaryDirectory() as d:
+            w.exe.setText(fake_cli(d, version=version, delay=0.2))
+            w.update_version()
+            seen, fractions = [], []
+            update = self.siril.update_progress
+
+            def record(message, fraction):
+                fractions.append(fraction)
+                update(message, fraction)
+
+            self.siril.update_progress = record
+            w.start_preview()
+            for _ in range(400):
+                self.app.processEvents()
+                seen.append((not w.progress.isHidden(), w.progress.maximum(), w.progress.value()))
+                if not w.running() and not w.send_when_done and not w.rerun:
+                    self.app.processEvents()
+                    break
+                w.worker.wait(20)
+        self.assertTrue(w.progress.isHidden(), "the bar is hidden when done")
+        self.assertIsNotNone(w.view.after)
+        return seen, fractions
+
+    def test_progress_bar_shows_the_cli_progress(self):
+        seen, fractions = self.run_with_fake_cli("0.5.1")
+        running = [s for s in seen if s[0]]
+        self.assertTrue(running and all(m == 1000 for _, m, _ in running), running)
+        self.assertIn(500, [v for _, _, v in running])
+        self.assertEqual(fractions[0], 0.0)
+        self.assertIn(0.5, fractions)
+        self.assertIsNone(self.siril.progress, "Siril's bar is reset when done")
+
+    def test_busy_bar_with_an_older_cli(self):
+        seen, fractions = self.run_with_fake_cli("0.5.0")
+        running = [s for s in seen if s[0]]
+        self.assertTrue(running and all(m == 0 for _, m, _ in running), running)
+        self.assertEqual(fractions, [-1.0], "Siril's bar pulses")
 
     def test_divider_drag(self):
         from PyQt6.QtCore import QPoint, Qt
