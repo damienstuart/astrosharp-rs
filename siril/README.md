@@ -1,6 +1,6 @@
 # AstroSharp for Siril
 
-A Siril script that runs [AstroSharp](../astrosharp-rs) on the image currently open in
+A Siril script that runs [AstroSharp](../README.md) on the image currently open in
 Siril. It offers AstroSharp's models:
 - **Dual PSF** (the default) sharpens the stars and the rest of the image with different
   PSF models, mixed through a feathered star mask.
@@ -21,8 +21,9 @@ looks linear, the script logs a warning in Siril's console, but it still process
 
 - Siril 1.4 or later. The script uses Siril's bundled Python with numpy and PyQt6.
 - AstroSharp 0.5.0 or later for Dual PSF and Star Mask; the other models work from
-  0.3.0. Run `make install` in `astrosharp-rs`, which puts `AstroSharp.app`, with its CLI
-  at `Contents/MacOS/astrosharp-cli`, in `/Applications`. The script finds it there;
+  0.3.0. Install it from a [release](https://github.com/damienstuart/astrosharp-rs/releases),
+  or run `make install` in this repository, which puts `AstroSharp.app`, with its CLI at
+  `Contents/MacOS/astrosharp-cli`, in `/Applications`. The script finds it there;
   otherwise choose the CLI, or `AstroSharp.app` itself, with **Browse…**.
   - The window shows the CLI's version, with a note if it's too old for the chosen model.
   - With AstroSharp 0.5.1 or later the progress bars show a percentage; with earlier
@@ -30,10 +31,14 @@ looks linear, the script logs a warning in Siril's console, but it still process
 
 ## Install
 
-Copy `AstroSharp.py` into a folder on Siril's script path, for example `~/.siril/scripts`:
+Download `AstroSharp.py` from a [release](https://github.com/damienstuart/astrosharp-rs/releases)
+(or take it from this folder) and copy it into a folder on Siril's script path, for example
+`~/.siril/scripts`. Siril lists its script folders under **Preferences → Scripts**. From a
+checkout of this repository:
 
 ```sh
-make install                       # copies to ~/.siril/scripts (SIRIL_SCRIPTS=... to change)
+make siril-install                 # from the repository root: copies to ~/.siril/scripts
+make install                       # the same, from this folder (SIRIL_SCRIPTS=... to change)
 ```
 
 Then refresh Siril's script list (**Scripts → Refresh Script List**, or restart Siril).
@@ -100,10 +105,16 @@ The script appears in the **Scripts** menu.
 
 ## Development
 
+From the repository root, `make siril-test` builds the CLI and tests the script against
+that build:
+
 ```sh
-make test                              # unit tests (creates .venv with numpy and PyQt6)
-make test ASTROSHARP_FITS=image.fit    # also the CLI integration test on a real FITS file
+make siril-test                              # unit tests (creates siril/.venv with numpy and PyQt6)
+make siril-test ASTROSHARP_FITS=image.fit    # also the CLI integration test on a real FITS file
 ```
+
+Inside this folder, `make test` does the same against the installed AstroSharp (or the CLI
+in `ASTROSHARP_CLI`).
 
 The tests cover:
 - The script's FITS writing/reading and its 16-bit/float conversions.
@@ -120,8 +131,7 @@ The tests cover:
 - With `ASTROSHARP_FITS`: a check that processing through the script gives results
   bit-identical to running the CLI directly on the file.
 
-They don't need Siril. Set `ASTROSHARP_CLI` to use a CLI other than the one in
-`/Applications`, for example a fresh build in `astrosharp-rs/target/release/bundle/`.
+They don't need Siril.
 
 ### Manual check in Siril
 

@@ -26,6 +26,7 @@ Installers are on the [releases page](https://github.com/damienstuart/astrosharp
 - **Windows 10 and 11 (x64 or ARM64):** run `AstroSharp-<version>-setup.exe`; see [Windows](#windows) for what it installs.
   - SmartScreen may show "Windows protected your PC". Click **More info**, then **Run anyway**.
 - **Linux:** build and install from source with `make install-linux`; see [Linux](#linux).
+- **Siril:** `AstroSharp.py` runs AstroSharp from inside Siril; see [Siril script](#siril-script).
 
 ## Recommended workflow
 
@@ -47,6 +48,7 @@ Images that look linear trigger a note in the GUI and on the CLI's stderr: the w
 | `tools/package_windows.ps1`, `tools/windows/` | Builds the Windows (ARM64) installer with Inno Setup |
 | `tools/icon` | Standalone helper (uses `resvg`) that renders the icon SVG for `make icon` |
 | `assets/` | App icon: `icon.svg` (source), plus the generated `AppIcon.icns` (macOS), `AppIcon.ico` (Windows) and `icon-512.png` (window/Dock icon) |
+| `siril/` | Siril script (`AstroSharp.py`) that runs the CLI on Siril's open image, with its tests |
 | `testdata/samples` | The sample TIFFs shipped with the R app |
 
 ## Usage
@@ -62,10 +64,12 @@ make install-linux           # Linux: install the GUI, CLI and a desktop launche
 make check                   # rustfmt check + clippy + tests
 make icon                    # re-render assets/icon.svg into AppIcon.icns, AppIcon.ico + icon-512.png (commit the results)
 make golden                  # regenerate R reference outputs (R_APP=... if not ../AstroSharp/resources/app)
+make siril-install           # copy the Siril script to ~/.siril/scripts
+make siril-test              # test the Siril script against a fresh CLI build (needs Python 3)
 ```
 
 The app bundle also contains the CLI, at `/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli`
-after `make install` (the Siril script uses it from there).
+after `make install` (the [Siril script](#siril-script) uses it from there).
 
 CLI example: `astrosharp in.fit out.fit --model hybrid --psf 3 --aggressiveness 0.66`.
 The input can be TIFF or FITS (`.fit`/`.fits`/`.fts`).
@@ -151,6 +155,16 @@ powershell -ExecutionPolicy Bypass -File tools\package_windows.ps1
   - Offers two unticked options: a desktop shortcut, and adding the CLI to your PATH.
 - **The executables** carry the AstroSharp icon and version details, need no Visual C++ Redistributable, and the GUI opens without a console window.
 - **Signing:** the installer isn't code-signed. Windows SmartScreen only warns about it when it was downloaded from the internet.
+
+## Siril script
+
+`siril/AstroSharp.py` runs AstroSharp on the image open in [Siril](https://siril.org) (1.4 or later):
+- Every model, with the same settings as the app.
+- A preview with zoom, pan and a before/after divider, and a progress bar while it processes.
+- **Send to Siril** applies the result with an undo point and records the settings in the FITS HISTORY.
+- It also runs from Siril scripts (`.ssf`), for example `pyscript AstroSharp.py -model dual-psf -starpsf 2`.
+
+To install it, put `AstroSharp.py` from a [release](https://github.com/damienstuart/astrosharp-rs/releases) in a folder on Siril's script path (listed under **Preferences → Scripts**); from a checkout, `make siril-install` copies it to `~/.siril/scripts`. It uses the AstroSharp CLI from the app's install location. [`siril/README.md`](siril/README.md) has the details.
 
 ## FITS (Siril)
 
