@@ -9,7 +9,7 @@ APP_DIR ?= /Applications
 ICONSET := target/AppIcon.iconset
 
 .DEFAULT_GOAL := help
-.PHONY: help build release test check lint fmt run cli app icon install install-linux uninstall-linux golden weights clean
+.PHONY: help build release test check lint fmt run cli app icon install install-linux uninstall-linux siril-test siril-install golden weights clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -57,6 +57,13 @@ install-linux: ## Linux: install the GUI, CLI and desktop launcher for the curre
 
 uninstall-linux: ## Linux: remove what install-linux installed
 	./tools/install_linux.sh --uninstall
+
+siril-test: ## Test the Siril script against a fresh CLI build (needs Python 3)
+	$(CARGO) build --release -p astrosharp-cli
+	$(MAKE) -C siril test ASTROSHARP_CLI="$(CURDIR)/target/release/astrosharp" ASTROSHARP_FITS="$(abspath $(ASTROSHARP_FITS))"
+
+siril-install: ## Copy the Siril script (siril/AstroSharp.py) to Siril's scripts folder
+	$(MAKE) -C siril install
 
 golden: ## Regenerate R reference outputs (needs R and the original app at R_APP)
 	Rscript tools/make_golden.R "$(R_APP)" $(GOLDEN)
