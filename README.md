@@ -88,6 +88,7 @@ Options:
   - PNG: 8 or 16 (default).
   - JPEG: 8 only.
 - `--quality <1..100>` (JPEG only, default 90)
+- `--progress`: print progress to stdout while processing, as `progress <fraction>` lines from 0 to 1, for scripts such as the Siril one
 
 GUI (Dual PSF is the default model):
 - **Processing** starts with "Process image"; opening a file never processes it. A progress bar with Cancel shows while it runs.
