@@ -1,5 +1,8 @@
+use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use astrosharp_core::{
@@ -85,6 +88,10 @@ struct Args {
     /// JPEG quality (1–100).
     #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u8).range(1..=100))]
     quality: u8,
+    /// Print progress to stdout while processing, as `progress <fraction>` lines (0 to 1),
+    /// for scripts.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -189,7 +196,12 @@ fn run(args: &Args, params: &Params) -> Result<()> {
         );
     }
     let t1 = Instant::now();
-    let out = process(&img, params, &Progress::new())?;
+    let progress = Progress::new();
+    let out = if args.progress {
+        report_progress(&progress, || process(&img, params, &progress))?
+    } else {
+        process(&img, params, &progress)?
+    };
     let t2 = Instant::now();
     // FITS output keeps a FITS input's sample type unless --depth says otherwise.
     let source_depth = fits
@@ -218,4 +230,42 @@ fn run(args: &Args, params: &Params) -> Result<()> {
         (t3 - t2).as_secs_f64(),
     );
     Ok(())
+}
+
+/// How often `--progress` reports.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Runs `f`, printing `progress <fraction>` lines to stdout whenever `progress` moves (at
+/// most every [`PROGRESS_INTERVAL`]), then `progress 1.000`. Output errors are ignored: a
+/// closed pipe must not fail the run.
+fn report_progress<T>(progress: &Progress, f: impl FnOnce() -> T) -> T {
+    let print = |fraction: f32| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "progress {fraction:.3}");
+        let _ = out.flush();
+    };
+    let done = AtomicBool::new(false);
+    let (result, last) = thread::scope(|s| {
+        let reporter = s.spawn(|| {
+            let mut last = None;
+            while !done.load(Ordering::Relaxed) {
+                // Reported in steps of 0.001, the printed precision.
+                let step = (progress.fraction() * 1000.0).round() as u32;
+                if last != Some(step) {
+                    print(step as f32 / 1000.0);
+                    last = Some(step);
+                }
+                thread::park_timeout(PROGRESS_INTERVAL);
+            }
+            last
+        });
+        let result = f();
+        done.store(true, Ordering::Relaxed);
+        reporter.thread().unpark();
+        (result, reporter.join().unwrap_or(None))
+    });
+    if last != Some(1000) {
+        print(1.0);
+    }
+    result
 }
