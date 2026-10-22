@@ -11,8 +11,8 @@
 # Requirements:
 #   - Siril 1.4 or later
 #   - AstroSharp 0.3.0 or later (0.5.0 or later for Dual PSF and Star Mask; 0.5.1 or later
-#     for a progress percentage); its CLI is found in
-#     /Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli (or choose it in the window)
+#     for a progress percentage). Its CLI is found where the installers put it (see
+#     default_cli_paths) or on the PATH, or choose it in the window.
 #
 # Usage:
 #   - From Siril's Scripts menu: opens a window with the settings and a preview with a
@@ -21,21 +21,24 @@
 #       pyscript AstroSharp.py -model dual-psf -psf 3 -starpsf 2 -aggressiveness 0.66
 #     Options not given use the settings last saved from the window.
 #
-# Version: 0.4.0
+# Version: 0.4.1
 # 0.1.0: First version.
 # 0.2.0: Preview with zoom/pan and before/after divider; "Send to Siril".
 # 0.3.0: Dual PSF and Star Mask models (AstroSharp 0.5.0), with the star mask settings;
 #        Dual PSF is the default model.
 # 0.4.0: Progress bar while processing (a percentage with AstroSharp 0.5.1); the Preview
 #        button is now "Process".
+# 0.4.1: Finds the CLI where the Windows and Linux installers put it, or on the PATH.
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,8 +52,7 @@ s.ensure_installed("PyQt6")
 
 import numpy as np  # noqa: E402 (installed with sirilpy)
 
-VERSION = "0.4.0"
-DEFAULT_CLI = "/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli"
+VERSION = "0.4.1"
 MIN_CLI_VERSION = (0, 3, 0)
 CONFIG_NAME = "astrosharp.conf"
 MODELS = {"dual-psf": "Dual PSF", "hybrid": "Hybrid", "psf": "PSF",
@@ -283,6 +285,30 @@ def history_text(p: Params) -> str:
     return f"AstroSharp: {settings_text(p)}"[:70]
 
 
+def default_cli_paths(platform: Optional[str] = None) -> list[str]:
+    """Where the AstroSharp installers put the CLI on `platform` (default: this one), then
+    any astrosharp-cli on the PATH."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        paths = ["/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli"]
+    elif platform.startswith("win"):
+        # The installer's per-user location, %LOCALAPPDATA%\Programs\AstroSharp.
+        local = os.environ.get("LOCALAPPDATA") or ntpath.join(
+            os.path.expanduser("~"), "AppData", "Local")
+        paths = [ntpath.join(local, "Programs", "AstroSharp", "astrosharp-cli.exe")]
+    else:
+        # tools/install_linux.sh puts it in ~/.local/bin.
+        paths = [os.path.join(os.path.expanduser("~"), ".local", "bin", "astrosharp-cli")]
+    on_path = shutil.which("astrosharp-cli")
+    if on_path and on_path not in paths:
+        paths.append(on_path)
+    return paths
+
+
+# Where this platform's installer puts the CLI.
+DEFAULT_CLI = default_cli_paths()[0]
+
+
 def resolve_executable(path: str) -> str:
     """Accepts the CLI itself or the AstroSharp.app bundle containing it."""
     if path.endswith(".app"):
@@ -291,7 +317,8 @@ def resolve_executable(path: str) -> str:
 
 
 def find_executable(configured: Optional[str]) -> Optional[str]:
-    for candidate in (configured, DEFAULT_CLI):
+    """The configured CLI if it exists, else the first of default_cli_paths() that does."""
+    for candidate in [configured, *default_cli_paths()]:
         if candidate:
             candidate = resolve_executable(candidate)
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -328,8 +355,8 @@ def check_executable(configured: Optional[str], model: Optional[str] = None) -> 
     exe = find_executable(configured)
     if exe is None:
         raise RuntimeError(
-            f"AstroSharp CLI not found. Install AstroSharp.app in /Applications or choose "
-            f"the CLI ({DEFAULT_CLI}) in the AstroSharp window.")
+            f"AstroSharp CLI not found. Install AstroSharp (its CLI goes in {DEFAULT_CLI}) or "
+            f"choose the CLI in the AstroSharp window.")
     version = cli_version(exe)
     if version is None or version < MIN_CLI_VERSION:
         raise RuntimeError(f"{exe} is not AstroSharp {version_text(MIN_CLI_VERSION)} or later.")
@@ -1103,9 +1130,11 @@ def create_window(siril):
             self.version.setText(f"AstroSharp {version_text(version)}{note}")
 
         def browse(self):
+            mac = sys.platform == "darwin"
             path, _ = QFileDialog.getOpenFileName(
-                self, "Choose the AstroSharp CLI (or AstroSharp.app)",
-                os.path.dirname(self.exe.text()) or "/Applications")
+                self, "Choose the AstroSharp CLI" + (" (or AstroSharp.app)" if mac else ""),
+                os.path.dirname(self.exe.text())
+                or ("/Applications" if mac else os.path.dirname(DEFAULT_CLI)))
             if path:
                 self.exe.setText(resolve_executable(path))
                 self.cli = (None, None)  # check again, even if it's the same path

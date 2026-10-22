@@ -16,6 +16,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -212,8 +213,28 @@ class CommandTests(unittest.TestCase):
                              str(app / "astrosharp-cli"))
             self.assertEqual(A.cli_version(str(exe)), (9, 9, 9))
             missing = str(Path(d) / "nope")
-            default = A.DEFAULT_CLI if os.access(A.DEFAULT_CLI, os.X_OK) else None
-            self.assertEqual(A.find_executable(missing), default)
+            installed = [p for p in A.default_cli_paths() if os.access(p, os.X_OK)]
+            self.assertEqual(A.find_executable(missing), installed[0] if installed else None)
+
+    def test_default_cli_paths_per_platform(self):
+        env = {"PATH": "", "HOME": "/home/astro", "LOCALAPPDATA": r"C:\Users\astro\AppData\Local"}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(A.default_cli_paths("darwin"),
+                             ["/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli"])
+            self.assertEqual(A.default_cli_paths("win32"),
+                             [r"C:\Users\astro\AppData\Local\Programs\AstroSharp\astrosharp-cli.exe"])
+            self.assertEqual(A.default_cli_paths("linux"), ["/home/astro/.local/bin/astrosharp-cli"])
+
+    def test_cli_on_the_path_is_found(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as bin_dir:
+            exe = Path(bin_dir) / "astrosharp-cli"
+            exe.write_text("#!/bin/sh\necho astrosharp-cli 0.5.1\n")
+            exe.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": bin_dir, "HOME": home}), \
+                    mock.patch.object(A.sys, "platform", "linux"):
+                # Nothing in ~/.local/bin, so the one on the PATH is used.
+                self.assertEqual(A.default_cli_paths()[-1], str(exe))
+                self.assertEqual(A.find_executable(None), str(exe))
 
 
 CLI = os.environ.get("ASTROSHARP_CLI", A.DEFAULT_CLI)

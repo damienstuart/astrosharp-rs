@@ -22,9 +22,12 @@ looks linear, the script logs a warning in Siril's console, but it still process
 - Siril 1.4 or later. The script uses Siril's bundled Python with numpy and PyQt6.
 - AstroSharp 0.5.0 or later for Dual PSF and Star Mask; the other models work from
   0.3.0. Install it from a [release](https://github.com/damienstuart/astrosharp-rs/releases),
-  or run `make install` in this repository, which puts `AstroSharp.app`, with its CLI at
-  `Contents/MacOS/astrosharp-cli`, in `/Applications`. The script finds it there;
-  otherwise choose the CLI, or `AstroSharp.app` itself, with **Browse…**.
+  or build it from this repository. The script looks for the CLI where the installers put
+  it, then on the PATH; otherwise choose the CLI (or, on macOS, `AstroSharp.app`) with
+  **Browse…**:
+  - macOS: `/Applications/AstroSharp.app/Contents/MacOS/astrosharp-cli` (`make install`).
+  - Windows: `%LOCALAPPDATA%\Programs\AstroSharp\astrosharp-cli.exe` (the installer).
+  - Linux: `~/.local/bin/astrosharp-cli` (`make install-linux`).
   - The window shows the CLI's version, with a note if it's too old for the chosen model.
   - With AstroSharp 0.5.1 or later the progress bars show a percentage; with earlier
     versions they show that it's busy.
@@ -119,6 +122,7 @@ in `ASTROSHARP_CLI`).
 The tests cover:
 - The script's FITS writing/reading and its 16-bit/float conversions.
 - The command line for each model, the HISTORY text and the per-model CLI version check.
+- Finding the CLI: each platform's install location, and the PATH.
 - The processing flow against a fake Siril, using the real CLI, for Hybrid, Dual PSF and
   Star Mask (which keeps colour images RGB).
 - Progress: reading the CLI's progress lines (with a stand-in CLI, and with the real one
